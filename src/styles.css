@@ -511,6 +511,18 @@ textarea:focus {
   padding: 18px;
 }
 
+.detail-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.detail-head h3 {
+  margin: 0;
+}
+
 .detail-block h3 {
   margin: 0 0 12px;
 }

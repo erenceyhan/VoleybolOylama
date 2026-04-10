@@ -213,6 +213,23 @@ export async function deleteRemoteSuggestion(suggestionId: string) {
   }
 }
 
+export async function updateRemoteSuggestionNote(
+  suggestionId: string,
+  note: string,
+) {
+  const client = requireSupabase();
+  const { error } = await client
+    .from("suggestions")
+    .update({
+      note: note.trim(),
+    })
+    .eq("id", suggestionId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
 export async function upsertRemoteVote(suggestionId: string, value: number) {
   const client = requireSupabase();
   const {

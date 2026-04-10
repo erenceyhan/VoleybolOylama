@@ -20,6 +20,7 @@ import {
   signOutRemote,
   signUpPendingMember,
   updateMemberApproval,
+  updateRemoteSuggestionNote,
   upsertRemoteVote,
 } from "./remote";
 import {
@@ -115,6 +116,8 @@ function App() {
   const [suggestionDraft, setSuggestionDraft] =
     useState<SuggestionDraft>(emptySuggestionDraft);
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
+  const [editingSuggestionId, setEditingSuggestionId] = useState<string | null>(null);
+  const [editingSuggestionNote, setEditingSuggestionNote] = useState("");
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(
     () => (remoteEnabled ? null : initialAppData.suggestions[0]?.id ?? null),
   );
@@ -605,6 +608,10 @@ function App() {
       try {
         await deleteRemoteSuggestion(suggestionId);
         await hydrateRemoteState();
+        if (editingSuggestionId === suggestionId) {
+          setEditingSuggestionId(null);
+          setEditingSuggestionNote("");
+        }
       } catch (error) {
         setSuggestionError(getAuthErrorMessage(error));
       } finally {
@@ -620,6 +627,66 @@ function App() {
       votes: current.votes.filter((vote) => vote.suggestionId !== suggestionId),
       comments: current.comments.filter((comment) => comment.suggestionId !== suggestionId),
     }));
+    if (editingSuggestionId === suggestionId) {
+      setEditingSuggestionId(null);
+      setEditingSuggestionNote("");
+    }
+  }
+
+  function startSuggestionNoteEdit(suggestion: Suggestion) {
+    if (!canEditSuggestionNote(suggestion)) {
+      return;
+    }
+
+    setEditingSuggestionId(suggestion.id);
+    setEditingSuggestionNote(suggestion.note);
+    setSuggestionError("");
+  }
+
+  function cancelSuggestionNoteEdit() {
+    setEditingSuggestionId(null);
+    setEditingSuggestionNote("");
+  }
+
+  async function handleSuggestionNoteSave(
+    event: FormEvent<HTMLFormElement>,
+    suggestionId: string,
+  ) {
+    event.preventDefault();
+
+    const targetSuggestion = appData.suggestions.find(
+      (suggestion) => suggestion.id === suggestionId,
+    );
+
+    if (!targetSuggestion || !canEditSuggestionNote(targetSuggestion)) {
+      return;
+    }
+
+    const nextNote = editingSuggestionNote.trim();
+
+    if (remoteEnabled) {
+      setIsSubmitting(true);
+
+      try {
+        await updateRemoteSuggestionNote(suggestionId, nextNote);
+        await hydrateRemoteState();
+        cancelSuggestionNoteEdit();
+      } catch (error) {
+        setSuggestionError(getAuthErrorMessage(error));
+      } finally {
+        setIsSubmitting(false);
+      }
+
+      return;
+    }
+
+    setAppData((current) => ({
+      ...current,
+      suggestions: current.suggestions.map((suggestion) =>
+        suggestion.id === suggestionId ? { ...suggestion, note: nextNote } : suggestion,
+      ),
+    }));
+    cancelSuggestionNoteEdit();
   }
 
   async function handleDeleteComment(commentId: string) {
@@ -752,12 +819,20 @@ function App() {
     )?.value;
   }
 
-  function canManageSuggestion(suggestion: Suggestion) {
+  function canDeleteSuggestion(suggestion: Suggestion) {
     if (!currentMember) {
       return false;
     }
 
     return currentMember.id === suggestion.memberId || isAdmin;
+  }
+
+  function canEditSuggestionNote(suggestion: Suggestion) {
+    if (!currentMember) {
+      return false;
+    }
+
+    return currentMember.id === suggestion.memberId;
   }
 
   function canManageComment(comment: Comment) {
@@ -1248,7 +1323,7 @@ function App() {
                       {formatDate(selectedSuggestion.createdAt)} tarihinde eklendi.
                     </p>
                   </div>
-                  {canManageSuggestion(selectedSuggestion) ? (
+                  {canDeleteSuggestion(selectedSuggestion) ? (
                     <button
                       type="button"
                       className="ghost-button danger-button"
@@ -1282,8 +1357,56 @@ function App() {
                 </div>
 
                 <div className="detail-block">
-                  <h3>Oneri notu</h3>
-                  <p>{selectedSuggestion.note || "Bu oneride ek bir not yok."}</p>
+                  <div className="detail-head">
+                    <h3>Oneri notu</h3>
+                    {canEditSuggestionNote(selectedSuggestion) &&
+                    editingSuggestionId !== selectedSuggestion.id ? (
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() => startSuggestionNoteEdit(selectedSuggestion)}
+                        disabled={isSubmitting}
+                      >
+                        Duzenle
+                      </button>
+                    ) : null}
+                  </div>
+                  {editingSuggestionId === selectedSuggestion.id ? (
+                    <form
+                      className="stack-form"
+                      onSubmit={(event) =>
+                        void handleSuggestionNoteSave(event, selectedSuggestion.id)
+                      }
+                    >
+                      <textarea
+                        rows={4}
+                        maxLength={300}
+                        value={editingSuggestionNote}
+                        placeholder="Bu ismi neden sectigini yaz."
+                        onChange={(event) => setEditingSuggestionNote(event.target.value)}
+                        disabled={isSubmitting}
+                      />
+                      <div className="inline-actions">
+                        <button
+                          type="submit"
+                          className="primary-button"
+                          disabled={isSubmitting}
+                        >
+                          Kaydet
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={cancelSuggestionNoteEdit}
+                          disabled={isSubmitting}
+                        >
+                          Vazgec
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <p>{selectedSuggestion.note || "Bu oneride ek bir not yok."}</p>
+                  )}
                 </div>
 
                 <div className="detail-block">

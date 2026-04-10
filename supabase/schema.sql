@@ -328,12 +328,13 @@ with check (
 );
 
 drop policy if exists "owners or admins can update suggestions" on public.suggestions;
-create policy "owners or admins can update suggestions"
+drop policy if exists "owners can update suggestions" on public.suggestions;
+create policy "owners can update suggestions"
 on public.suggestions
 for update
 to authenticated
-using (member_id = auth.uid() or public.current_profile_role() = 'admin')
-with check (member_id = auth.uid() or public.current_profile_role() = 'admin');
+using (member_id = auth.uid())
+with check (member_id = auth.uid());
 
 drop policy if exists "owners or admins can delete suggestions" on public.suggestions;
 create policy "owners or admins can delete suggestions"
