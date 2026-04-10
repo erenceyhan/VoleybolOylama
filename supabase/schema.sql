@@ -337,6 +337,7 @@ using (member_id = auth.uid())
 with check (member_id = auth.uid());
 
 drop policy if exists "owners or admins can delete suggestions" on public.suggestions;
+drop policy if exists "owners can delete suggestions" on public.suggestions;
 create policy "owners or admins can delete suggestions"
 on public.suggestions
 for delete
