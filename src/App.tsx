@@ -1090,8 +1090,9 @@ function App() {
                 <div>
                   <h2>Yeni isim onerisi</h2>
                   <p>
-                    Kisi basi en fazla {MAX_SUGGESTIONS_PER_MEMBER} oneriyi sinirli
-                    tutuyoruz ki liste dagilmasin.
+                    {remoteEnabled
+                      ? `Oneri eklemek icin once kayit olup giris yapman ve onay alman gerekir. Kisi basi en fazla ${MAX_SUGGESTIONS_PER_MEMBER} oneri yapilabilir.`
+                      : `Kisi basi en fazla ${MAX_SUGGESTIONS_PER_MEMBER} oneri yapilabilir.`}
                   </p>
                 </div>
               </div>
@@ -1143,11 +1144,9 @@ function App() {
               <div className="panel-heading">
                 <div>
                   <h2>Uyeler</h2>
-                  <p>
-                    {remoteEnabled
-                      ? "Admin tum uyeleri gorur. Onayli uyeler kendi aralarinda listeyi gorur."
-                      : "16 kisilik kadroyu su an kod icinden yonetiyoruz."}
-                  </p>
+                  {!remoteEnabled ? (
+                    <p>16 kisilik kadroyu su an kod icinden yonetiyoruz.</p>
+                  ) : null}
                 </div>
               </div>
               <div className="member-list">
