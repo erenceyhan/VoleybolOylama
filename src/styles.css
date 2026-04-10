@@ -549,6 +549,11 @@ textarea:focus {
   gap: 4px;
 }
 
+.comment-card {
+  display: grid;
+  gap: 10px;
+}
+
 .comment-form {
   margin-bottom: 14px;
 }
@@ -561,8 +566,17 @@ textarea:focus {
   margin-bottom: 8px;
 }
 
+.comment-meta strong {
+  font-size: 0.98rem;
+}
+
 .comment-card p {
   margin: 0;
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.7;
+  font-weight: 500;
+  letter-spacing: 0.01em;
 }
 
 .empty-state strong {

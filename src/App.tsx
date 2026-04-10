@@ -207,6 +207,7 @@ function App() {
   const isPendingApproval = Boolean(
     remoteEnabled && currentMember && !currentMember.approved && !isAdmin,
   );
+  const pendingOnlyMode = remoteEnabled && isPendingApproval;
   const isOwnSelectedSuggestion = Boolean(
     currentMember &&
       selectedSuggestion &&
@@ -790,24 +791,26 @@ function App() {
               tek ekranda gorulebilir.
             </p>
           </div>
-          <div className="hero-stats">
-            <article className="stat-card">
-              <span>Uye</span>
-              <strong>{appData.members.filter((member) => member.approved !== false).length}</strong>
-            </article>
-            <article className="stat-card">
-              <span>Oneri</span>
-              <strong>{appData.suggestions.length}</strong>
-            </article>
-            <article className="stat-card">
-              <span>Aktif oylayan</span>
-              <strong>{activeVoters}</strong>
-            </article>
-            <article className="stat-card">
-              <span>Yorum</span>
-              <strong>{appData.comments.length}</strong>
-            </article>
-          </div>
+          {!pendingOnlyMode ? (
+            <div className="hero-stats">
+              <article className="stat-card">
+                <span>Uye</span>
+                <strong>{appData.members.filter((member) => member.approved !== false).length}</strong>
+              </article>
+              <article className="stat-card">
+                <span>Oneri</span>
+                <strong>{appData.suggestions.length}</strong>
+              </article>
+              <article className="stat-card">
+                <span>Aktif oylayan</span>
+                <strong>{activeVoters}</strong>
+              </article>
+              <article className="stat-card">
+                <span>Yorum</span>
+                <strong>{appData.comments.length}</strong>
+              </article>
+            </div>
+          ) : null}
         </section>
 
         {!remoteEnabled ? (
@@ -837,6 +840,8 @@ function App() {
 
         <section className="layout-grid">
           <div className="column-stack">
+            {!pendingOnlyMode ? (
+              <>
             <section className="panel">
               <div className="panel-heading">
                 <div>
@@ -1168,8 +1173,12 @@ function App() {
                 )}
               </div>
             </section>
+              </>
+            ) : null}
           </div>
 
+          {!pendingOnlyMode ? (
+            <>
           <section className="panel list-panel">
             <div className="panel-heading">
               <div>
@@ -1416,6 +1425,8 @@ function App() {
               </div>
             )}
           </section>
+            </>
+          ) : null}
         </section>
       </main>
     </div>

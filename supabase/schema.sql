@@ -294,7 +294,7 @@ on public.profiles
 for select
 to authenticated
 using (
-  approved = true
+  (approved = true and public.current_profile_is_approved())
   or id = auth.uid()
   or public.current_profile_role() = 'admin'
 );
