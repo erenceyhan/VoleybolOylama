@@ -840,8 +840,6 @@ function App() {
 
         <section className="layout-grid">
           <div className="column-stack">
-            {!pendingOnlyMode ? (
-              <>
             <section className="panel">
               <div className="panel-heading">
                 <div>
@@ -1085,6 +1083,8 @@ function App() {
               </section>
             ) : null}
 
+            {!pendingOnlyMode ? (
+              <>
             <section className="panel">
               <div className="panel-heading">
                 <div>
