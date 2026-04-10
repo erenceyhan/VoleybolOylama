@@ -1116,10 +1116,10 @@ function App() {
                 <label>
                   Kisa not
                   <textarea
-                    rows={3}
-                    maxLength={120}
+                    rows={4}
+                    maxLength={300}
                     value={suggestionDraft.note}
-                    placeholder="Bu ismi neden sevdigini kisaca yazabilirsin."
+                    placeholder="Bu ismi neden sevdigini biraz daha detayli yazabilirsin."
                     onChange={(event) =>
                       setSuggestionDraft((current) => ({
                         ...current,
