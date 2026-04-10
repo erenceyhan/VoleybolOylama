@@ -91,6 +91,42 @@ before insert on public.suggestions
 for each row
 execute function public.enforce_suggestion_limit();
 
+create or replace function public.enforce_no_self_vote()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  suggestion_owner_id uuid;
+begin
+  select member_id
+  into suggestion_owner_id
+  from public.suggestions
+  where id = new.suggestion_id;
+
+  if suggestion_owner_id is null then
+    raise exception 'Oylanacak oneri bulunamadi.';
+  end if;
+
+  if suggestion_owner_id = new.member_id then
+    raise exception 'Kendi onerine puan veremezsin.';
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists no_self_vote_trigger on public.votes;
+create trigger no_self_vote_trigger
+before insert or update on public.votes
+for each row
+execute function public.enforce_no_self_vote();
+
+delete from public.votes
+using public.suggestions
+where public.votes.suggestion_id = public.suggestions.id
+  and public.votes.member_id = public.suggestions.member_id;
+
 create or replace function public.complete_signup(
   display_name_input text
 )
@@ -192,6 +228,58 @@ begin
   end if;
 
   return profile_row;
+end;
+$$;
+
+create or replace function public.admin_reject_member(
+  member_id_input uuid
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  target_profile public.profiles;
+begin
+  if auth.uid() is null then
+    raise exception 'Gecerli bir oturum bulunamadi.';
+  end if;
+
+  if public.current_profile_role() <> 'admin' then
+    raise exception 'Bu islem sadece admin tarafindan yapilabilir.';
+  end if;
+
+  select *
+  into target_profile
+  from public.profiles
+  where id = member_id_input;
+
+  if not found then
+    raise exception 'Reddedilecek uye bulunamadi.';
+  end if;
+
+  if target_profile.id = auth.uid() then
+    raise exception 'Kendi hesabini reddedemezsin.';
+  end if;
+
+  if target_profile.role = 'admin' then
+    raise exception 'Admin hesabi reddedilemez.';
+  end if;
+
+  delete from auth.users
+  where id = member_id_input;
+
+  if not found then
+    delete from public.profiles
+    where id = member_id_input;
+
+    if not found then
+      raise exception 'Silinecek uye bulunamadi.';
+    end if;
+  end if;
+
+  return member_id_input;
 end;
 $$;
 
@@ -325,3 +413,4 @@ grant execute on function public.current_profile_role() to authenticated;
 grant execute on function public.current_profile_is_approved() to authenticated;
 grant execute on function public.complete_signup(text) to authenticated;
 grant execute on function public.admin_set_member_approval(uuid, boolean) to authenticated;
+grant execute on function public.admin_reject_member(uuid) to authenticated;

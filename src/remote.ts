@@ -317,3 +317,14 @@ export async function updateMemberApproval(memberId: string, approved: boolean) 
     throw new Error(error.message);
   }
 }
+
+export async function rejectRemoteMember(memberId: string) {
+  const client = requireSupabase();
+  const { error } = await client.rpc("admin_reject_member", {
+    member_id_input: memberId,
+  });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}

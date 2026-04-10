@@ -15,6 +15,7 @@ import {
   fetchPendingMembers,
   fetchRemoteAppData,
   getRemoteSessionMember,
+  rejectRemoteMember,
   signInWithUsernamePassword,
   signOutRemote,
   signUpPendingMember,
@@ -206,6 +207,28 @@ function App() {
   const isPendingApproval = Boolean(
     remoteEnabled && currentMember && !currentMember.approved && !isAdmin,
   );
+  const isOwnSelectedSuggestion = Boolean(
+    currentMember &&
+      selectedSuggestion &&
+      currentMember.id === selectedSuggestion.memberId,
+  );
+  const currentSelectedVote = selectedSuggestion
+    ? getCurrentMemberVote(selectedSuggestion.id)
+    : undefined;
+
+  useEffect(() => {
+    if (!remoteEnabled || !sessionMemberId || !isPendingApproval) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void hydrateRemoteState();
+    }, 5000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isPendingApproval, remoteEnabled, sessionMemberId]);
 
   async function hydrateRemoteState() {
     setIsBootingRemote(true);
@@ -424,6 +447,15 @@ function App() {
       return;
     }
 
+    const targetSuggestion = appData.suggestions.find(
+      (suggestion) => suggestion.id === suggestionId,
+    );
+
+    if (targetSuggestion && targetSuggestion.memberId === currentMember.id) {
+      setSuggestionError("Kendi onerine puan veremezsin.");
+      return;
+    }
+
     const safeValue = clampVote(value);
 
     if (remoteEnabled) {
@@ -626,6 +658,30 @@ function App() {
       await updateMemberApproval(memberId, approved);
       await hydrateRemoteState();
       setAuthNotice(approved ? "Uye onaylandi." : "Uye tekrar beklemeye alindi.");
+    } catch (error) {
+      setAdminError(getAuthErrorMessage(error));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function handleRejectMember(memberId: string) {
+    const shouldReject = window.confirm(
+      "Bu uyeligi reddedip tum kaydini silmek istiyor musun?",
+    );
+
+    if (!shouldReject) {
+      return;
+    }
+
+    setAdminError("");
+    setAuthNotice("");
+    setIsSubmitting(true);
+
+    try {
+      await rejectRemoteMember(memberId);
+      await hydrateRemoteState();
+      setAuthNotice("Uyelik reddedildi.");
     } catch (error) {
       setAdminError(getAuthErrorMessage(error));
     } finally {
@@ -1002,16 +1058,24 @@ function App() {
                             <div className="inline-actions">
                               <button
                                 type="button"
-                            className="primary-button"
-                            onClick={() => void handleApproval(member.id, true)}
-                            disabled={isSubmitting}
-                          >
-                            Onayla
-                          </button>
-                        </div>
-                      </article>
-                    ))
-                  )}
+                                className="primary-button"
+                                onClick={() => void handleApproval(member.id, true)}
+                                disabled={isSubmitting}
+                              >
+                                Onayla
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost-button danger-button"
+                                onClick={() => void handleRejectMember(member.id)}
+                                disabled={isSubmitting}
+                              >
+                                Reddet
+                              </button>
+                            </div>
+                          </article>
+                        ))
+                      )}
                 </div>
               </section>
             ) : null}
@@ -1217,6 +1281,9 @@ function App() {
                 <div className="detail-block">
                   <h3>Puan ver</h3>
                   {canParticipate ? (
+                    isOwnSelectedSuggestion ? (
+                      <p className="muted-text">Kendi onerine puan veremezsin.</p>
+                    ) : (
                     <>
                       <div className="vote-grid">
                         {Array.from(
@@ -1227,9 +1294,7 @@ function App() {
                             key={value}
                             type="button"
                             className={`vote-button ${
-                              getCurrentMemberVote(selectedSuggestion.id) === value
-                                ? "is-active"
-                                : ""
+                              currentSelectedVote === value ? "is-active" : ""
                             }`}
                             onClick={() => void handleVote(selectedSuggestion.id, value)}
                             disabled={isSubmitting}
@@ -1238,7 +1303,7 @@ function App() {
                           </button>
                         ))}
                       </div>
-                      {getCurrentMemberVote(selectedSuggestion.id) ? (
+                      {currentSelectedVote ? (
                         <button
                           type="button"
                           className="ghost-button inline-top"
@@ -1249,6 +1314,7 @@ function App() {
                         </button>
                       ) : null}
                     </>
+                    )
                   ) : (
                     <p className="muted-text">
                       {isPendingApproval
