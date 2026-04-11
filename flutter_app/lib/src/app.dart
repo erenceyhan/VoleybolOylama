@@ -2338,15 +2338,54 @@ class _HeroCopy extends StatelessWidget {
         ),
         if (showStats) ...[
           const SizedBox(height: 22),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              _StatCard(label: 'Uye', value: approvedMemberCount.toString()),
-              _StatCard(label: 'Oneri', value: suggestionCount.toString()),
-              _StatCard(label: 'Aktif oylayan', value: activeVoters.toString()),
-              _StatCard(label: 'Yorum', value: commentCount.toString()),
-            ],
+          SizedBox(
+            width: double.infinity,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                const spacing = 12.0;
+                final maxWidth = constraints.maxWidth;
+                final columns = maxWidth >= 660 ? 4 : 2;
+                final cardWidth = columns == 4
+                    ? (maxWidth - (spacing * 3)) / 4
+                    : (maxWidth - spacing) / 2;
+
+                return Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: spacing,
+                  runSpacing: spacing,
+                  children: [
+                    SizedBox(
+                      width: cardWidth,
+                      child: _StatCard(
+                        label: 'Uye',
+                        value: approvedMemberCount.toString(),
+                      ),
+                    ),
+                    SizedBox(
+                      width: cardWidth,
+                      child: _StatCard(
+                        label: 'Oneri',
+                        value: suggestionCount.toString(),
+                      ),
+                    ),
+                    SizedBox(
+                      width: cardWidth,
+                      child: _StatCard(
+                        label: 'Aktif oylayan',
+                        value: activeVoters.toString(),
+                      ),
+                    ),
+                    SizedBox(
+                      width: cardWidth,
+                      child: _StatCard(
+                        label: 'Yorum',
+                        value: commentCount.toString(),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
           ),
         ],
       ],
@@ -2683,8 +2722,8 @@ class _StatCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 154,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+      constraints: const BoxConstraints(minHeight: 128),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 18),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           colors: [
@@ -2700,10 +2739,12 @@ class _StatCard extends StatelessWidget {
         ),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Text(
             label,
+            textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: Colors.white.withValues(alpha: 0.66),
                 ),
@@ -2711,6 +2752,7 @@ class _StatCard extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             value,
+            textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                   color: Colors.white,
                   fontWeight: FontWeight.w800,
