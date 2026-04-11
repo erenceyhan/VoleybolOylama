@@ -2344,10 +2344,14 @@ class _HeroCopy extends StatelessWidget {
               builder: (context, constraints) {
                 const spacing = 12.0;
                 final maxWidth = constraints.maxWidth;
-                final columns = maxWidth >= 660 ? 4 : 2;
-                final cardWidth = columns == 4
+                final isCompact = maxWidth < 520;
+                final columns = maxWidth >= 760 ? 4 : 2;
+                final rawCardWidth = columns == 4
                     ? (maxWidth - (spacing * 3)) / 4
                     : (maxWidth - spacing) / 2;
+                final cardWidth = columns == 4
+                    ? rawCardWidth.clamp(132.0, 156.0)
+                    : rawCardWidth.clamp(118.0, 146.0);
 
                 return Wrap(
                   alignment: WrapAlignment.center,
@@ -2359,6 +2363,7 @@ class _HeroCopy extends StatelessWidget {
                       child: _StatCard(
                         label: 'Uye',
                         value: approvedMemberCount.toString(),
+                        compact: isCompact,
                       ),
                     ),
                     SizedBox(
@@ -2366,6 +2371,7 @@ class _HeroCopy extends StatelessWidget {
                       child: _StatCard(
                         label: 'Oneri',
                         value: suggestionCount.toString(),
+                        compact: isCompact,
                       ),
                     ),
                     SizedBox(
@@ -2373,6 +2379,7 @@ class _HeroCopy extends StatelessWidget {
                       child: _StatCard(
                         label: 'Aktif oylayan',
                         value: activeVoters.toString(),
+                        compact: isCompact,
                       ),
                     ),
                     SizedBox(
@@ -2380,6 +2387,7 @@ class _HeroCopy extends StatelessWidget {
                       child: _StatCard(
                         label: 'Yorum',
                         value: commentCount.toString(),
+                        compact: isCompact,
                       ),
                     ),
                   ],
@@ -2714,16 +2722,21 @@ class _StatCard extends StatelessWidget {
   const _StatCard({
     required this.label,
     required this.value,
+    this.compact = false,
   });
 
   final String label;
   final String value;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      constraints: const BoxConstraints(minHeight: 128),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 18),
+      constraints: BoxConstraints(minHeight: compact ? 112 : 128),
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 12 : 14,
+        vertical: compact ? 14 : 18,
+      ),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           colors: [
@@ -2745,15 +2758,19 @@ class _StatCard extends StatelessWidget {
           Text(
             label,
             textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontSize: compact ? 13 : 14,
                   color: Colors.white.withValues(alpha: 0.66),
                 ),
           ),
-          const SizedBox(height: 6),
+          SizedBox(height: compact ? 4 : 6),
           Text(
             value,
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  fontSize: compact ? 34 : null,
                   color: Colors.white,
                   fontWeight: FontWeight.w800,
                 ),
