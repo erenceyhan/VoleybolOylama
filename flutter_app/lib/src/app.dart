@@ -8,7 +8,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'auth_utils.dart';
 import 'models.dart';
 import 'repository.dart';
-import 'svg_picker.dart';
+import 'svg_picker_types.dart';
+import 'svg_upload_action.dart';
 
 const _pageBackground = Color(0xFFF3EFE6);
 const _surfaceColor = Colors.white;
@@ -892,7 +893,10 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _handleSuggestionAssetUpload(String suggestionId) async {
+  Future<void> _handlePickedSuggestionAssets(
+    String suggestionId,
+    List<PickedSvgFile> pickedFiles,
+  ) async {
     final suggestion = _findSuggestionById(suggestionId);
 
     if (suggestion == null) {
@@ -914,9 +918,10 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    final pickedFiles = await pickSvgFiles(allowMultiple: false);
-
-    if (pickedFiles == null || pickedFiles.isEmpty) {
+    if (pickedFiles.length > remainingSlots) {
+      _showError(
+        'Bu oneriye en fazla $remainingSlots SVG daha ekleyebilirsin.',
+      );
       return;
     }
 
@@ -2178,18 +2183,17 @@ class _HomePageState extends State<HomePage> {
             _DetailBlock(
               title: 'Amblem / logo',
               trailing: _canUploadSuggestionAssets(selectedSuggestion)
-                  ? TextButton.icon(
-                      onPressed: _isSubmitting ||
-                              suggestionAssets.length >=
-                                  maxSuggestionAssetsPerSuggestion
-                          ? null
-                          : () async {
-                              await _handleSuggestionAssetUpload(
-                                selectedSuggestion.id,
-                              );
-                            },
-                      icon: const Icon(Icons.upload_file_outlined),
-                      label: const Text('SVG yukle'),
+                  ? SvgUploadActionButton(
+                      enabled: !_isSubmitting &&
+                          suggestionAssets.length <
+                              maxSuggestionAssetsPerSuggestion,
+                      label: 'SVG yukle',
+                      onFilesPicked: (pickedFiles) async {
+                        await _handlePickedSuggestionAssets(
+                          selectedSuggestion.id,
+                          pickedFiles,
+                        );
+                      },
                     )
                   : null,
               child: Column(
