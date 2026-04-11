@@ -12,15 +12,23 @@ Future<List<PickedSvgFile>?> pickSvgFiles({
   final completer = Completer<List<PickedSvgFile>?>();
   final input = HTMLInputElement()
     ..type = 'file'
-    ..accept = '.svg,image/svg+xml'
+    ..accept = 'image/svg+xml,.svg'
     ..multiple = allowMultiple
-    ..style.display = 'none';
+    ..style.opacity = '0'
+    ..style.position = 'fixed'
+    ..style.left = '-1000px'
+    ..style.top = '0'
+    ..style.width = '1px'
+    ..style.height = '1px'
+    ..style.pointerEvents = 'none';
 
   document.body?.children.add(input);
 
   void cleanup() {
     input.remove();
   }
+
+  late EventListener focusListener;
 
   input.onChange.listen((_) async {
     final files = input.files;
@@ -50,7 +58,23 @@ Future<List<PickedSvgFile>?> pickSvgFiles({
     cleanup();
   });
 
-  input.click();
+  focusListener = ((Event _) {
+    window.removeEventListener('focus', focusListener);
+    Future<void>.delayed(const Duration(milliseconds: 350), () {
+      final hasSelection = (input.files?.length ?? 0) > 0;
+      if (!hasSelection && !completer.isCompleted) {
+        completer.complete(null);
+        cleanup();
+      }
+    });
+  }).toJS;
+  window.addEventListener('focus', focusListener);
+
+  try {
+    input.showPicker();
+  } catch (_) {
+    input.click();
+  }
 
   return completer.future;
 }
