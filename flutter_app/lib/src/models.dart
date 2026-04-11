@@ -1,6 +1,10 @@
 import 'package:intl/intl.dart';
 
 const maxSuggestionsPerMember = 3;
+const maxSuggestionAssetsPerSuggestion = 3;
+const maxSuggestionAssetBytes = 400 * 1024;
+const suggestionAssetBucket = 'suggestion-assets';
+const suggestionAssetFormatLabel = 'SVG';
 const minVote = 1;
 const maxVote = 5;
 
@@ -114,10 +118,45 @@ class CommentEntry {
   }
 }
 
+class SuggestionAsset {
+  const SuggestionAsset({
+    required this.id,
+    required this.suggestionId,
+    required this.memberId,
+    required this.storagePath,
+    required this.mimeType,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String suggestionId;
+  final String memberId;
+  final String storagePath;
+  final String mimeType;
+  final DateTime createdAt;
+
+  String get fileName {
+    final segments = storagePath.split('/');
+    return segments.isEmpty ? storagePath : segments.last;
+  }
+
+  factory SuggestionAsset.fromRow(Map<String, dynamic> row) {
+    return SuggestionAsset(
+      id: row['id'] as String,
+      suggestionId: row['suggestion_id'] as String,
+      memberId: row['member_id'] as String,
+      storagePath: row['storage_path'] as String? ?? '',
+      mimeType: row['mime_type'] as String? ?? 'image/svg+xml',
+      createdAt: DateTime.parse(row['created_at'] as String),
+    );
+  }
+}
+
 class AppData {
   const AppData({
     required this.members,
     required this.suggestions,
+    required this.assets,
     required this.votes,
     required this.comments,
   });
@@ -125,11 +164,13 @@ class AppData {
   const AppData.empty()
       : members = const [],
         suggestions = const [],
+        assets = const [],
         votes = const [],
         comments = const [];
 
   final List<Member> members;
   final List<Suggestion> suggestions;
+  final List<SuggestionAsset> assets;
   final List<VoteEntry> votes;
   final List<CommentEntry> comments;
 }
@@ -174,6 +215,16 @@ List<CommentEntry> getSuggestionComments(
   return comments
       .where((comment) => comment.suggestionId == suggestionId)
       .toList();
+}
+
+List<SuggestionAsset> getSuggestionAssets(
+  List<SuggestionAsset> assets,
+  String suggestionId,
+) {
+  final filtered =
+      assets.where((asset) => asset.suggestionId == suggestionId).toList();
+  filtered.sort((left, right) => left.createdAt.compareTo(right.createdAt));
+  return filtered;
 }
 
 int getMemberSuggestionCount(List<Suggestion> suggestions, String memberId) {

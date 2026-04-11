@@ -48,6 +48,34 @@ create table if not exists public.comments (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.suggestion_assets (
+  id uuid primary key default gen_random_uuid(),
+  suggestion_id uuid not null references public.suggestions (id) on delete cascade,
+  member_id uuid not null references public.profiles (id) on delete cascade,
+  storage_path text not null unique,
+  mime_type text not null default 'image/svg+xml' check (mime_type = 'image/svg+xml'),
+  created_at timestamptz not null default now()
+);
+
+insert into storage.buckets (
+  id,
+  name,
+  public,
+  file_size_limit,
+  allowed_mime_types
+)
+values (
+  'suggestion-assets',
+  'suggestion-assets',
+  true,
+  409600,
+  array['image/svg+xml']
+)
+on conflict (id) do update
+set public = true,
+    file_size_limit = 409600,
+    allowed_mime_types = array['image/svg+xml'];
+
 create or replace function public.current_profile_role()
 returns text
 language sql
@@ -90,6 +118,49 @@ create trigger suggestion_limit_trigger
 before insert on public.suggestions
 for each row
 execute function public.enforce_suggestion_limit();
+
+create or replace function public.enforce_suggestion_asset_rules()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  suggestion_owner_id uuid;
+  asset_count integer;
+begin
+  select member_id
+  into suggestion_owner_id
+  from public.suggestions
+  where id = new.suggestion_id;
+
+  if suggestion_owner_id is null then
+    raise exception 'Logo yuklenecek oneri bulunamadi.';
+  end if;
+
+  if new.member_id <> suggestion_owner_id then
+    raise exception 'SVG dosyasini sadece oneriyi ekleyen uye yukleyebilir.';
+  end if;
+
+  if tg_op = 'INSERT' then
+    select count(*)
+    into asset_count
+    from public.suggestion_assets
+    where suggestion_id = new.suggestion_id;
+
+    if asset_count >= 3 then
+      raise exception 'Her oneri icin en fazla 3 SVG yuklenebilir.';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists suggestion_asset_rules_trigger on public.suggestion_assets;
+create trigger suggestion_asset_rules_trigger
+before insert or update on public.suggestion_assets
+for each row
+execute function public.enforce_suggestion_asset_rules();
 
 create or replace function public.enforce_no_self_vote()
 returns trigger
@@ -285,6 +356,7 @@ $$;
 
 alter table public.profiles enable row level security;
 alter table public.suggestions enable row level security;
+alter table public.suggestion_assets enable row level security;
 alter table public.votes enable row level security;
 alter table public.comments enable row level security;
 
@@ -340,6 +412,36 @@ drop policy if exists "owners or admins can delete suggestions" on public.sugges
 drop policy if exists "owners can delete suggestions" on public.suggestions;
 create policy "owners or admins can delete suggestions"
 on public.suggestions
+for delete
+to authenticated
+using (member_id = auth.uid() or public.current_profile_role() = 'admin');
+
+drop policy if exists "approved users can read suggestion assets" on public.suggestion_assets;
+create policy "approved users can read suggestion assets"
+on public.suggestion_assets
+for select
+to authenticated
+using (
+  public.current_profile_is_approved()
+  or public.current_profile_role() = 'admin'
+);
+
+drop policy if exists "owners can insert suggestion assets" on public.suggestion_assets;
+create policy "owners can insert suggestion assets"
+on public.suggestion_assets
+for insert
+to authenticated
+with check (
+  member_id = auth.uid()
+  and (
+    public.current_profile_is_approved()
+    or public.current_profile_role() = 'admin'
+  )
+);
+
+drop policy if exists "owners or admins can delete suggestion assets" on public.suggestion_assets;
+create policy "owners or admins can delete suggestion assets"
+on public.suggestion_assets
 for delete
 to authenticated
 using (member_id = auth.uid() or public.current_profile_role() = 'admin');
@@ -406,13 +508,55 @@ for delete
 to authenticated
 using (member_id = auth.uid() or public.current_profile_role() = 'admin');
 
+drop policy if exists "approved users can view suggestion svg objects" on storage.objects;
+create policy "approved users can view suggestion svg objects"
+on storage.objects
+for select
+to authenticated
+using (
+  bucket_id = 'suggestion-assets'
+  and (
+    public.current_profile_is_approved()
+    or public.current_profile_role() = 'admin'
+  )
+);
+
+drop policy if exists "owners can upload suggestion svg objects" on storage.objects;
+create policy "owners can upload suggestion svg objects"
+on storage.objects
+for insert
+to authenticated
+with check (
+  bucket_id = 'suggestion-assets'
+  and (
+    public.current_profile_is_approved()
+    or public.current_profile_role() = 'admin'
+  )
+  and (storage.foldername(name))[1] = auth.uid()::text
+);
+
+drop policy if exists "owners or admins can delete suggestion svg objects" on storage.objects;
+create policy "owners or admins can delete suggestion svg objects"
+on storage.objects
+for delete
+to authenticated
+using (
+  bucket_id = 'suggestion-assets'
+  and (
+    (storage.foldername(name))[1] = auth.uid()::text
+    or public.current_profile_role() = 'admin'
+  )
+);
+
 grant usage on schema public to authenticated;
 grant select, update on public.profiles to authenticated;
 grant select, insert, update, delete on public.suggestions to authenticated;
+grant select, insert, delete on public.suggestion_assets to authenticated;
 grant select, insert, update, delete on public.votes to authenticated;
 grant select, insert, delete on public.comments to authenticated;
 grant execute on function public.current_profile_role() to authenticated;
 grant execute on function public.current_profile_is_approved() to authenticated;
+grant execute on function public.enforce_suggestion_asset_rules() to authenticated;
 grant execute on function public.complete_signup(text) to authenticated;
 grant execute on function public.admin_set_member_approval(uuid, boolean) to authenticated;
 grant execute on function public.admin_reject_member(uuid) to authenticated;

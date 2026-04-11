@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -890,6 +892,127 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _handleSuggestionAssetUpload(String suggestionId) async {
+    final suggestion = _findSuggestionById(suggestionId);
+
+    if (suggestion == null) {
+      _showError('Oneri bulunamadi.');
+      return;
+    }
+
+    if (!_canUploadSuggestionAssets(suggestion)) {
+      _showError('SVG dosyalarini sadece oneriyi ekleyen uye yukleyebilir.');
+      return;
+    }
+
+    final currentAssets = getSuggestionAssets(_appData.assets, suggestionId);
+    final remainingSlots =
+        maxSuggestionAssetsPerSuggestion - currentAssets.length;
+
+    if (remainingSlots <= 0) {
+      _showError('Bu oneri icin en fazla 3 SVG saklanabilir.');
+      return;
+    }
+
+    final picked = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['svg'],
+      allowMultiple: true,
+      withData: true,
+    );
+
+    if (picked == null || picked.files.isEmpty) {
+      return;
+    }
+
+    if (picked.files.length > remainingSlots) {
+      _showError(
+        'Bu oneriye en fazla $remainingSlots SVG daha ekleyebilirsin.',
+      );
+      return;
+    }
+
+    for (final file in picked.files) {
+      final lowerName = file.name.trim().toLowerCase();
+      final bytes = file.bytes;
+
+      if (!lowerName.endsWith('.svg')) {
+        _showError('Sadece SVG formatinda dosya yuklenebilir.');
+        return;
+      }
+
+      if (bytes == null || bytes.isEmpty) {
+        _showError('Secilen SVG dosyasi okunamadi.');
+        return;
+      }
+
+      if (bytes.length > maxSuggestionAssetBytes) {
+        _showError('Her SVG dosyasi en fazla 400 KB olabilir.');
+        return;
+      }
+    }
+
+    setState(() {
+      _isSubmitting = true;
+    });
+
+    try {
+      for (final file in picked.files) {
+        await _repository.uploadSuggestionAsset(
+          suggestionId: suggestionId,
+          fileName: file.name,
+          bytes: file.bytes!,
+        );
+      }
+      _showNotice(
+        picked.files.length == 1
+            ? 'SVG dosyasi eklendi.'
+            : 'SVG dosyalari eklendi.',
+      );
+      await _hydrateRemoteState(showLoading: false);
+    } catch (error) {
+      _showError(getAuthErrorMessage(error));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _handleDeleteSuggestionAsset(SuggestionAsset asset) async {
+    if (!_canDeleteSuggestionAsset(asset)) {
+      return;
+    }
+
+    final shouldDelete = await _confirmAction(
+      'Bu SVG dosyasini silmek istiyor musun?',
+    );
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    setState(() {
+      _isSubmitting = true;
+    });
+
+    try {
+      await _repository.deleteSuggestionAsset(asset);
+      _showNotice('SVG dosyasi silindi.');
+      await _hydrateRemoteState(showLoading: false);
+    } catch (error) {
+      _showError(getAuthErrorMessage(error));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+        });
+      }
+    }
+  }
+
   Future<void> _handleDeleteComment(String commentId) async {
     final shouldDelete =
         await _confirmAction('Bu yorumu silmek istiyor musun?');
@@ -1114,6 +1237,26 @@ class _HomePageState extends State<HomePage> {
     }
 
     return currentMember.id == suggestion.memberId;
+  }
+
+  bool _canUploadSuggestionAssets(Suggestion suggestion) {
+    final currentMember = _currentMember;
+
+    if (currentMember == null || !_canParticipate) {
+      return false;
+    }
+
+    return currentMember.id == suggestion.memberId;
+  }
+
+  bool _canDeleteSuggestionAsset(SuggestionAsset asset) {
+    final currentMember = _currentMember;
+
+    if (currentMember == null) {
+      return false;
+    }
+
+    return currentMember.id == asset.memberId || _isAdmin;
   }
 
   bool _canManageComment(CommentEntry comment) {
@@ -1932,6 +2075,10 @@ class _HomePageState extends State<HomePage> {
       _appData.comments,
       selectedSuggestion.id,
     );
+    final suggestionAssets = getSuggestionAssets(
+      _appData.assets,
+      selectedSuggestion.id,
+    );
     final commentController = _commentControllerFor(selectedSuggestion.id);
 
     return AnimatedSwitcher(
@@ -2040,6 +2187,82 @@ class _HomePageState extends State<HomePage> {
                             fontWeight: FontWeight.w500,
                           ),
                     ),
+            ),
+            const SizedBox(height: 18),
+            _DetailBlock(
+              title: 'Amblem / logo',
+              trailing: _canUploadSuggestionAssets(selectedSuggestion)
+                  ? TextButton.icon(
+                      onPressed: _isSubmitting ||
+                              suggestionAssets.length >=
+                                  maxSuggestionAssetsPerSuggestion
+                          ? null
+                          : () async {
+                              await _handleSuggestionAssetUpload(
+                                selectedSuggestion.id,
+                              );
+                            },
+                      icon: const Icon(Icons.upload_file_outlined),
+                      label: const Text('SVG yukle'),
+                    )
+                  : null,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_canUploadSuggestionAssets(selectedSuggestion)) ...[
+                    Text(
+                      'Yalnizca SVG kabul edilir. Her oneriye en fazla 3 dosya eklenebilir ve dosya basi sinir 400 KB.\nJPG\'den SVG\'ye ceviri kolay site: https://convertio.co/tr/',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: _mutedColor,
+                          ),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  if (suggestionAssets.isEmpty)
+                    Text(
+                      _canUploadSuggestionAssets(selectedSuggestion)
+                          ? 'Bu oneride henuz SVG yok. Buraya amblem ya da logo ekleyebilirsin.'
+                          : 'Bu oneride henuz logo eklenmemis.',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color: _mutedColor,
+                          ),
+                    )
+                  else
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final tileWidth = constraints.maxWidth >= 680
+                            ? 168.0
+                            : (constraints.maxWidth - 12) / 2;
+
+                        return Wrap(
+                          spacing: 12,
+                          runSpacing: 12,
+                          children: [
+                            for (final asset in suggestionAssets)
+                              SizedBox(
+                                width: tileWidth,
+                                child: _SuggestionAssetCard(
+                                  asset: asset,
+                                  imageUrl:
+                                      _repository.getSuggestionAssetPublicUrl(
+                                    asset.storagePath,
+                                  ),
+                                  canDelete: _canDeleteSuggestionAsset(asset),
+                                  onDelete: _isSubmitting
+                                      ? null
+                                      : () async {
+                                          await _handleDeleteSuggestionAsset(
+                                            asset,
+                                          );
+                                        },
+                                ),
+                              ),
+                          ],
+                        );
+                      },
+                    ),
+                ],
+              ),
             ),
             const SizedBox(height: 18),
             _DetailBlock(
@@ -3335,6 +3558,97 @@ class _CommentCard extends StatelessWidget {
               child: const Text('Yorumu sil'),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+class _SuggestionAssetCard extends StatelessWidget {
+  const _SuggestionAssetCard({
+    required this.asset,
+    required this.imageUrl,
+    required this.canDelete,
+    required this.onDelete,
+  });
+
+  final SuggestionAsset asset;
+  final String imageUrl;
+  final bool canDelete;
+  final VoidCallback? onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.8),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: _borderColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  suggestionAssetFormatLabel,
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: _primaryColor,
+                        fontWeight: FontWeight.w800,
+                      ),
+                ),
+              ),
+              if (canDelete)
+                IconButton(
+                  onPressed: onDelete,
+                  tooltip: 'SVG sil',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 32,
+                    height: 32,
+                  ),
+                  icon: const Icon(
+                    Icons.delete_outline,
+                    size: 18,
+                    color: _dangerColor,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          AspectRatio(
+            aspectRatio: 1,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: _surfaceAlt,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: _borderColor.withValues(alpha: 0.9)),
+              ),
+              child: SvgPicture.network(
+                imageUrl,
+                fit: BoxFit.contain,
+                placeholderBuilder: (context) => const Center(
+                  child: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2.2),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            formatDate(asset.createdAt),
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: _mutedColor,
+                ),
+          ),
         ],
       ),
     );
