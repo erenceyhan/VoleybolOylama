@@ -917,18 +917,12 @@ class _HomePageState extends State<HomePage> {
     final picked = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: const ['svg'],
-      allowMultiple: true,
+      allowMultiple: false,
       withData: true,
+      cancelUploadOnWindowBlur: false,
     );
 
     if (picked == null || picked.files.isEmpty) {
-      return;
-    }
-
-    if (picked.files.length > remainingSlots) {
-      _showError(
-        'Bu oneriye en fazla $remainingSlots SVG daha ekleyebilirsin.',
-      );
       return;
     }
 
@@ -965,9 +959,7 @@ class _HomePageState extends State<HomePage> {
         );
       }
       _showNotice(
-        picked.files.length == 1
-            ? 'SVG dosyasi eklendi.'
-            : 'SVG dosyalari eklendi.',
+        'SVG dosyasi eklendi.',
       );
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
