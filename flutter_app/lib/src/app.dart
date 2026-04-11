@@ -8,8 +8,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'auth_utils.dart';
 import 'models.dart';
 import 'repository.dart';
+import 'svg_picker.dart';
 import 'svg_picker_types.dart';
-import 'svg_upload_action.dart';
 
 const _pageBackground = Color(0xFFF3EFE6);
 const _surfaceColor = Colors.white;
@@ -970,6 +970,16 @@ class _HomePageState extends State<HomePage> {
         });
       }
     }
+  }
+
+  Future<void> _handleSuggestionAssetUpload(String suggestionId) async {
+    final pickedFiles = await pickSvgFiles(allowMultiple: false);
+
+    if (pickedFiles == null || pickedFiles.isEmpty) {
+      return;
+    }
+
+    await _handlePickedSuggestionAssets(suggestionId, pickedFiles);
   }
 
   Future<void> _handleDeleteSuggestionAsset(SuggestionAsset asset) async {
@@ -2183,17 +2193,18 @@ class _HomePageState extends State<HomePage> {
             _DetailBlock(
               title: 'Amblem / logo',
               trailing: _canUploadSuggestionAssets(selectedSuggestion)
-                  ? SvgUploadActionButton(
-                      enabled: !_isSubmitting &&
-                          suggestionAssets.length <
-                              maxSuggestionAssetsPerSuggestion,
-                      label: 'SVG yukle',
-                      onFilesPicked: (pickedFiles) async {
-                        await _handlePickedSuggestionAssets(
-                          selectedSuggestion.id,
-                          pickedFiles,
-                        );
-                      },
+                  ? TextButton.icon(
+                      onPressed: _isSubmitting ||
+                              suggestionAssets.length >=
+                                  maxSuggestionAssetsPerSuggestion
+                          ? null
+                          : () async {
+                              await _handleSuggestionAssetUpload(
+                                selectedSuggestion.id,
+                              );
+                            },
+                      icon: const Icon(Icons.upload_file_outlined),
+                      label: const Text('SVG yukle'),
                     )
                   : null,
               child: Column(
