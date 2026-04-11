@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -9,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'auth_utils.dart';
 import 'models.dart';
 import 'repository.dart';
+import 'svg_picker.dart';
 
 const _pageBackground = Color(0xFFF3EFE6);
 const _surfaceColor = Colors.white;
@@ -914,19 +914,13 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    final picked = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: const ['svg'],
-      allowMultiple: false,
-      withData: true,
-      cancelUploadOnWindowBlur: false,
-    );
+    final pickedFiles = await pickSvgFiles(allowMultiple: false);
 
-    if (picked == null || picked.files.isEmpty) {
+    if (pickedFiles == null || pickedFiles.isEmpty) {
       return;
     }
 
-    for (final file in picked.files) {
+    for (final file in pickedFiles) {
       final lowerName = file.name.trim().toLowerCase();
       final bytes = file.bytes;
 
@@ -935,7 +929,7 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      if (bytes == null || bytes.isEmpty) {
+      if (bytes.isEmpty) {
         _showError('Secilen SVG dosyasi okunamadi.');
         return;
       }
@@ -951,11 +945,11 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      for (final file in picked.files) {
+      for (final file in pickedFiles) {
         await _repository.uploadSuggestionAsset(
           suggestionId: suggestionId,
           fileName: file.name,
-          bytes: file.bytes!,
+          bytes: file.bytes,
         );
       }
       _showNotice(
