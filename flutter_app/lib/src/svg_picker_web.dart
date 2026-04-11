@@ -10,9 +10,10 @@ Future<List<PickedSvgFile>?> pickSvgFiles({
   bool allowMultiple = false,
 }) async {
   final completer = Completer<List<PickedSvgFile>?>();
+  final safariLikeBrowser = _isSafariLikeBrowser();
   final input = HTMLInputElement()
     ..type = 'file'
-    ..accept = 'image/svg+xml,.svg'
+    ..accept = safariLikeBrowser ? '' : '.svg'
     ..multiple = allowMultiple
     ..style.opacity = '0'
     ..style.position = 'fixed'
@@ -70,10 +71,14 @@ Future<List<PickedSvgFile>?> pickSvgFiles({
   }).toJS;
   window.addEventListener('focus', focusListener);
 
-  try {
-    input.showPicker();
-  } catch (_) {
+  if (safariLikeBrowser) {
     input.click();
+  } else {
+    try {
+      input.showPicker();
+    } catch (_) {
+      input.click();
+    }
   }
 
   return completer.future;
@@ -95,4 +100,16 @@ Future<Uint8List> _readFileBytes(File file) async {
 
   reader.readAsArrayBuffer(file);
   return completer.future;
+}
+
+bool _isSafariLikeBrowser() {
+  final userAgent = window.navigator.userAgent.toLowerCase();
+  final isIos = userAgent.contains('iphone') ||
+      userAgent.contains('ipad') ||
+      userAgent.contains('ipod');
+  final isSafari = userAgent.contains('safari') &&
+      !userAgent.contains('crios') &&
+      !userAgent.contains('fxios') &&
+      !userAgent.contains('edgios');
+  return isIos || isSafari;
 }
