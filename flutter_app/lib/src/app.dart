@@ -577,6 +577,23 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _refreshAdminVisitEntries() async {
+    if (!_isAdmin) {
+      return;
+    }
+
+    final visitLoad = await _fetchAdminVisitLoadResult();
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _memberVisits = visitLoad.entries;
+      _visitError = visitLoad.errorMessage;
+    });
+  }
+
   void _syncPendingTimer() {
     _pendingRefreshTimer?.cancel();
 
@@ -623,6 +640,8 @@ class _HomePageState extends State<HomePage> {
       _openMemberVisitsMemberId = memberId;
       _openSuggestionModalId = null;
     });
+
+    unawaited(_refreshAdminVisitEntries());
   }
 
   void _closeMemberVisitsModal() {
@@ -2474,7 +2493,7 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   if (_canUploadSuggestionAssets(selectedSuggestion)) ...[
                     Text(
-                      'Yalnizca SVG kabul edilir. Her oneriye en fazla 3 dosya eklenebilir ve dosya basi sinir 400 KB.\nJPG\'den SVG\'ye ceviri kolay site: https://convertio.co/tr/',
+                      'Yalnizca SVG kabul edilir. Her oneriye en fazla 3 dosya eklenebilir ve dosya basi sinir 400 KB.\nJPG\'den SVG\'ye ceviri kolay site: https://convertio.co/tr/\nRenkli SVG icin: https://www.recraft.ai/',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                             color: _mutedColor,
                           ),

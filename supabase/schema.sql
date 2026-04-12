@@ -215,9 +215,22 @@ set search_path = public
 as $$
 declare
   visit_row public.member_visits;
+  recent_visit_row public.member_visits;
 begin
   if auth.uid() is null then
     raise exception 'Gecerli bir oturum bulunamadi.';
+  end if;
+
+  select *
+  into recent_visit_row
+  from public.member_visits
+  where member_id = auth.uid()
+    and created_at >= now() - interval '2 minutes'
+  order by created_at desc
+  limit 1;
+
+  if found then
+    return recent_visit_row;
   end if;
 
   insert into public.member_visits (member_id)

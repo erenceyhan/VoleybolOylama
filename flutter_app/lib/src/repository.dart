@@ -85,6 +85,8 @@ class AppRepository {
       email: getVirtualEmailForUsername(username),
       password: password,
     );
+
+    await recordCurrentMemberVisit();
   }
 
   Future<void> signUpPendingMember({
@@ -114,6 +116,7 @@ class AppRepository {
           'display_name_input': normalizedUsername,
         },
       );
+      await recordCurrentMemberVisit();
     } catch (_) {
       await client.auth.signOut();
       rethrow;
