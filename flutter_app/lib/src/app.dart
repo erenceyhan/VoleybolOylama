@@ -326,6 +326,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _isSubmitting = false;
   bool _isLoadingMemberActivity = false;
   bool _isTimingOutSession = false;
+  bool _isEstablishingSession = false;
   String? _pageAccessLoggedMemberId;
   DateTime? _lastInteractionAt;
   String? _lastInteractionMemberId;
@@ -343,6 +344,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _registerInteractionController(_suggestionNoteController);
     _registerInteractionController(_editingSuggestionNoteController);
     _authSubscription = _repository.authStateChanges.listen((_) {
+      if (_isEstablishingSession) {
+        return;
+      }
+
       unawaited(_hydrateRemoteState(showLoading: false));
     });
     unawaited(_hydrateRemoteState());
@@ -1045,14 +1050,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _loginError = '';
       _isSubmitting = true;
     });
+    _isEstablishingSession = true;
 
     try {
       await _repository.signInWithUsernamePassword(username, password);
-      final sessionMember = await _repository.getRemoteSessionMember();
-      if (sessionMember != null) {
-        _sessionMemberId = sessionMember.id;
-        _rememberLastInteraction();
-      }
       _loginPasswordController.clear();
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
@@ -1066,6 +1067,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _loginError = getAuthErrorMessage(error);
       });
     } finally {
+      _isEstablishingSession = false;
       if (mounted) {
         setState(() {
           _isSubmitting = false;
@@ -1098,17 +1100,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _loginError = '';
       _isSubmitting = true;
     });
+    _isEstablishingSession = true;
 
     try {
       await _repository.signUpPendingMember(
         username: username,
         password: password,
       );
-      final sessionMember = await _repository.getRemoteSessionMember();
-      if (sessionMember != null) {
-        _sessionMemberId = sessionMember.id;
-        _rememberLastInteraction();
-      }
       _registerPasswordController.clear();
       _registerUsernameController.clear();
       _showNotice('Kayit alindi.');
@@ -1124,6 +1122,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _loginError = getAuthErrorMessage(error);
       });
     } finally {
+      _isEstablishingSession = false;
       if (mounted) {
         setState(() {
           _isSubmitting = false;
