@@ -85,8 +85,13 @@ class AppRepository {
       email: getVirtualEmailForUsername(username),
       password: password,
     );
-
-    await recordCurrentMemberVisit();
+    await logMemberActivity(
+      actionType: 'login_success',
+      targetType: 'auth',
+      details: {
+        'username': normalizeUsername(username),
+      },
+    );
   }
 
   Future<void> signUpPendingMember({
@@ -116,15 +121,32 @@ class AppRepository {
           'display_name_input': normalizedUsername,
         },
       );
-      await recordCurrentMemberVisit();
+      await logMemberActivity(
+        actionType: 'signup_completed',
+        targetType: 'auth',
+        details: {
+          'username': normalizedUsername,
+        },
+      );
     } catch (_) {
       await client.auth.signOut();
       rethrow;
     }
   }
 
-  Future<void> signOutRemote() {
-    return client.auth.signOut();
+  Future<void> signOutRemote({bool logAction = true}) async {
+    if (logAction) {
+      try {
+        await logMemberActivity(
+          actionType: 'logout',
+          targetType: 'auth',
+        );
+      } catch (_) {
+        // Logout akisinda log sorunlari ciksa da cikis devam etsin.
+      }
+    }
+
+    await client.auth.signOut();
   }
 
   Future<Suggestion> addRemoteSuggestion(String title, String note) async {
@@ -301,19 +323,38 @@ class AppRepository {
         .toList();
   }
 
-  Future<void> recordCurrentMemberVisit() {
-    return client.rpc('record_member_visit');
+  Future<void> logMemberActivity({
+    required String actionType,
+    String targetType = '',
+    String? targetId,
+    Map<String, dynamic>? details,
+  }) {
+    return client.rpc(
+      'log_member_activity',
+      params: {
+        'action_type_input': actionType,
+        'target_type_input': targetType,
+        'target_id_input': targetId,
+        'details_input': details ?? const <String, dynamic>{},
+      },
+    );
   }
 
-  Future<List<MemberVisitEntry>> fetchMemberVisits() async {
+  Future<List<MemberActivityLogEntry>> fetchMemberActivityLogs(
+    String memberId,
+  ) async {
     final data = await client
-        .from('member_visits')
-        .select('id, member_id, created_at')
+        .from('member_activity_logs')
+        .select(
+          'id, member_id, action_type, target_type, target_id, details, created_at',
+        )
+        .eq('member_id', memberId)
         .order('created_at', ascending: false);
 
     return (data as List<dynamic>)
-        .map((row) =>
-            MemberVisitEntry.fromRow(Map<String, dynamic>.from(row as Map)))
+        .map((row) => MemberActivityLogEntry.fromRow(
+              Map<String, dynamic>.from(row as Map),
+            ))
         .toList();
   }
 

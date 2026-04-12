@@ -1,8 +1,7 @@
 create extension if not exists pgcrypto;
 
-drop table if exists public.member_invites cascade;
-drop function if exists public.claim_invite(text, text);
-drop function if exists public.enforce_invite_limit();
+drop function if exists public.record_member_visit();
+drop table if exists public.member_visits cascade;
 
 create table if not exists public.profiles (
   id uuid primary key references auth.users (id) on delete cascade,
@@ -57,14 +56,18 @@ create table if not exists public.suggestion_assets (
   created_at timestamptz not null default now()
 );
 
-create table if not exists public.member_visits (
+create table if not exists public.member_activity_logs (
   id uuid primary key default gen_random_uuid(),
   member_id uuid not null references public.profiles (id) on delete cascade,
+  action_type text not null,
+  target_type text not null default '',
+  target_id text,
+  details jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
 
-create index if not exists member_visits_member_id_created_at_idx
-  on public.member_visits (member_id, created_at desc);
+create index if not exists member_activity_logs_member_id_created_at_idx
+  on public.member_activity_logs (member_id, created_at desc);
 
 insert into storage.buckets (
   id,
@@ -202,42 +205,41 @@ before insert or update on public.votes
 for each row
 execute function public.enforce_no_self_vote();
 
-delete from public.votes
-using public.suggestions
-where public.votes.suggestion_id = public.suggestions.id
-  and public.votes.member_id = public.suggestions.member_id;
-
-create or replace function public.record_member_visit()
-returns public.member_visits
+create or replace function public.log_member_activity(
+  action_type_input text,
+  target_type_input text default '',
+  target_id_input text default null,
+  details_input jsonb default '{}'::jsonb
+)
+returns public.member_activity_logs
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  visit_row public.member_visits;
-  recent_visit_row public.member_visits;
+  log_row public.member_activity_logs;
 begin
   if auth.uid() is null then
     raise exception 'Gecerli bir oturum bulunamadi.';
   end if;
 
-  select *
-  into recent_visit_row
-  from public.member_visits
-  where member_id = auth.uid()
-    and created_at >= now() - interval '2 minutes'
-  order by created_at desc
-  limit 1;
+  insert into public.member_activity_logs (
+    member_id,
+    action_type,
+    target_type,
+    target_id,
+    details
+  )
+  values (
+    auth.uid(),
+    coalesce(nullif(trim(action_type_input), ''), 'unknown'),
+    coalesce(trim(target_type_input), ''),
+    nullif(trim(coalesce(target_id_input, '')), ''),
+    coalesce(details_input, '{}'::jsonb)
+  )
+  returning * into log_row;
 
-  if found then
-    return recent_visit_row;
-  end if;
-
-  insert into public.member_visits (member_id)
-  values (auth.uid())
-  returning * into visit_row;
-
-  return visit_row;
+  return log_row;
 end;
 $$;
 
@@ -400,7 +402,7 @@ $$;
 alter table public.profiles enable row level security;
 alter table public.suggestions enable row level security;
 alter table public.suggestion_assets enable row level security;
-alter table public.member_visits enable row level security;
+alter table public.member_activity_logs enable row level security;
 alter table public.votes enable row level security;
 alter table public.comments enable row level security;
 
@@ -490,16 +492,16 @@ for delete
 to authenticated
 using (member_id = auth.uid() or public.current_profile_role() = 'admin');
 
-drop policy if exists "admins can read member visits" on public.member_visits;
-create policy "admins can read member visits"
-on public.member_visits
+drop policy if exists "admins can read member activity logs" on public.member_activity_logs;
+create policy "admins can read member activity logs"
+on public.member_activity_logs
 for select
 to authenticated
 using (public.current_profile_role() = 'admin');
 
-drop policy if exists "users can insert own member visits" on public.member_visits;
-create policy "users can insert own member visits"
-on public.member_visits
+drop policy if exists "users can insert own member activity logs" on public.member_activity_logs;
+create policy "users can insert own member activity logs"
+on public.member_activity_logs
 for insert
 to authenticated
 with check (member_id = auth.uid());
@@ -610,13 +612,13 @@ grant usage on schema public to authenticated;
 grant select, update on public.profiles to authenticated;
 grant select, insert, update, delete on public.suggestions to authenticated;
 grant select, insert, delete on public.suggestion_assets to authenticated;
-grant select, insert on public.member_visits to authenticated;
+grant select, insert on public.member_activity_logs to authenticated;
 grant select, insert, update, delete on public.votes to authenticated;
 grant select, insert, delete on public.comments to authenticated;
 grant execute on function public.current_profile_role() to authenticated;
 grant execute on function public.current_profile_is_approved() to authenticated;
 grant execute on function public.enforce_suggestion_asset_rules() to authenticated;
-grant execute on function public.record_member_visit() to authenticated;
+grant execute on function public.log_member_activity(text, text, text, jsonb) to authenticated;
 grant execute on function public.complete_signup(text) to authenticated;
 grant execute on function public.admin_set_member_approval(uuid, boolean) to authenticated;
 grant execute on function public.admin_reject_member(uuid) to authenticated;

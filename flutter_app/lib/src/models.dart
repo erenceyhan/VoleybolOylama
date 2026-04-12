@@ -152,21 +152,36 @@ class SuggestionAsset {
   }
 }
 
-class MemberVisitEntry {
-  const MemberVisitEntry({
+class MemberActivityLogEntry {
+  const MemberActivityLogEntry({
     required this.id,
     required this.memberId,
+    required this.actionType,
+    required this.targetType,
+    required this.targetId,
+    required this.details,
     required this.createdAt,
   });
 
   final String id;
   final String memberId;
+  final String actionType;
+  final String targetType;
+  final String? targetId;
+  final Map<String, dynamic> details;
   final DateTime createdAt;
 
-  factory MemberVisitEntry.fromRow(Map<String, dynamic> row) {
-    return MemberVisitEntry(
+  factory MemberActivityLogEntry.fromRow(Map<String, dynamic> row) {
+    final rawDetails = row['details'];
+    return MemberActivityLogEntry(
       id: row['id'] as String,
       memberId: row['member_id'] as String,
+      actionType: (row['action_type'] as String?) ?? '',
+      targetType: (row['target_type'] as String?) ?? '',
+      targetId: row['target_id'] as String?,
+      details: rawDetails is Map
+          ? Map<String, dynamic>.from(rawDetails)
+          : const <String, dynamic>{},
       createdAt: DateTime.parse(row['created_at'] as String),
     );
   }

@@ -23,6 +23,7 @@ const _dangerColor = Color(0xFFAF3C30);
 const _borderColor = Color(0xFFE2DACE);
 const _shadowColor = Color(0x1E1C2D28);
 const _heroGlowColor = Color(0xFF8FC1A9);
+const _sessionInactivityTimeout = Duration(minutes: 30);
 
 enum AuthView { login, register }
 
@@ -295,7 +296,7 @@ class _HomePageState extends State<HomePage> {
   late final AppRepository _repository;
   StreamSubscription<AuthState>? _authSubscription;
   Timer? _pendingRefreshTimer;
-  Timer? _visitHeartbeatTimer;
+  Timer? _sessionTimeoutTimer;
 
   final _loginUsernameController = TextEditingController();
   final _loginPasswordController = TextEditingController();
@@ -311,23 +312,32 @@ class _HomePageState extends State<HomePage> {
   String? _selectedSuggestionId;
   String? _editingSuggestionId;
   String? _openSuggestionModalId;
+  String? _openSuggestionAssetPreviewId;
   String? _openMemberVisitsMemberId;
   List<Member> _pendingMembers = const [];
-  List<MemberVisitEntry> _memberVisits = const [];
+  List<MemberActivityLogEntry> _memberActivityLogs = const [];
   AuthView _authView = AuthView.login;
   String _loginError = '';
   String _suggestionError = '';
   String _adminError = '';
-  String _visitError = '';
+  String _activityLogError = '';
   bool _isBooting = true;
   bool _isSubmitting = false;
-  DateTime? _lastVisitPingAt;
-  String? _lastVisitPingMemberId;
+  bool _isLoadingMemberActivity = false;
+  bool _isTimingOutSession = false;
+  String? _pageAccessLoggedMemberId;
 
   @override
   void initState() {
     super.initState();
     _repository = AppRepository(Supabase.instance.client);
+    _registerInteractionController(_loginUsernameController);
+    _registerInteractionController(_loginPasswordController);
+    _registerInteractionController(_registerUsernameController);
+    _registerInteractionController(_registerPasswordController);
+    _registerInteractionController(_suggestionTitleController);
+    _registerInteractionController(_suggestionNoteController);
+    _registerInteractionController(_editingSuggestionNoteController);
     _authSubscription = _repository.authStateChanges.listen((_) {
       unawaited(_hydrateRemoteState(showLoading: false));
     });
@@ -338,7 +348,7 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     _authSubscription?.cancel();
     _pendingRefreshTimer?.cancel();
-    _visitHeartbeatTimer?.cancel();
+    _sessionTimeoutTimer?.cancel();
     _loginUsernameController.dispose();
     _loginPasswordController.dispose();
     _registerUsernameController.dispose();
@@ -456,13 +466,54 @@ class _HomePageState extends State<HomePage> {
   TextEditingController _commentControllerFor(String suggestionId) {
     return _commentControllers.putIfAbsent(
       suggestionId,
-      TextEditingController.new,
+      () {
+        final controller = TextEditingController();
+        _registerInteractionController(controller);
+        return controller;
+      },
     );
+  }
+
+  void _registerInteractionController(TextEditingController controller) {
+    controller.addListener(_markInteraction);
+  }
+
+  void _markInteraction() {
+    if (_sessionMemberId == null || _isTimingOutSession) {
+      return;
+    }
+
+    _restartSessionTimeout();
+  }
+
+  void _restartSessionTimeout() {
+    _sessionTimeoutTimer?.cancel();
+
+    if (_sessionMemberId == null) {
+      return;
+    }
+
+    _sessionTimeoutTimer = Timer(
+      _sessionInactivityTimeout,
+      () => unawaited(_handleSessionTimeout()),
+    );
+  }
+
+  void _cancelSessionTimeout() {
+    _sessionTimeoutTimer?.cancel();
+    _sessionTimeoutTimer = null;
   }
 
   Suggestion? _findSuggestionById(String suggestionId) {
     return _appData.suggestions.cast<Suggestion?>().firstWhere(
           (item) => item?.id == suggestionId,
+          orElse: () => null,
+        );
+  }
+
+  SuggestionAsset? _findSuggestionAssetById(String assetId) {
+    return _appData.assets.cast<SuggestionAsset?>().firstWhere(
+          (item) => item?.id == assetId,
           orElse: () => null,
         );
   }
@@ -490,31 +541,27 @@ class _HomePageState extends State<HomePage> {
           _sessionMemberId = null;
           _appData = const AppData.empty();
           _pendingMembers = const [];
-          _memberVisits = const [];
+          _memberActivityLogs = const [];
           _selectedSuggestionId = null;
           _editingSuggestionId = null;
           _openMemberVisitsMemberId = null;
-          _visitError = '';
+          _activityLogError = '';
+          _isLoadingMemberActivity = false;
         });
-        _lastVisitPingAt = null;
-        _lastVisitPingMemberId = null;
-        _syncVisitHeartbeat(null);
+        _pageAccessLoggedMemberId = null;
+        _cancelSessionTimeout();
         _syncPendingTimer();
         return;
       }
 
-      await _recordVisitIfNeeded(sessionMember);
+      await _logPageAccessIfNeeded(sessionMember);
 
       final nextData = await _repository.fetchRemoteAppData();
       final nextPendingMembersFuture = sessionMember.isAdmin
           ? _repository.fetchPendingMembers()
           : Future.value(const <Member>[]);
-      final nextVisitLoadFuture = sessionMember.isAdmin
-          ? _fetchAdminVisitLoadResult()
-          : Future.value(const _AdminVisitLoadResult.empty());
 
       final nextPendingMembers = await nextPendingMembersFuture;
-      final nextVisitLoad = await nextVisitLoadFuture;
 
       if (!mounted) {
         return;
@@ -524,8 +571,6 @@ class _HomePageState extends State<HomePage> {
         _appData = nextData;
         _sessionMemberId = sessionMember!.id;
         _pendingMembers = nextPendingMembers;
-        _memberVisits = nextVisitLoad.entries;
-        _visitError = nextVisitLoad.errorMessage;
         final validSelection = _selectedSuggestionId != null &&
             nextData.suggestions.any(
               (suggestion) => suggestion.id == _selectedSuggestionId,
@@ -553,58 +598,13 @@ class _HomePageState extends State<HomePage> {
           _isBooting = false;
         });
         _syncPendingTimer();
-        _syncVisitHeartbeat(sessionMember?.id);
+        if (sessionMember == null) {
+          _cancelSessionTimeout();
+        } else {
+          _restartSessionTimeout();
+        }
       }
     }
-  }
-
-  Future<void> _recordVisitIfNeeded(Member sessionMember) async {
-    final now = DateTime.now();
-    final sameMember = _lastVisitPingMemberId == sessionMember.id;
-    final recentEnough = _lastVisitPingAt != null &&
-        now.difference(_lastVisitPingAt!) < const Duration(seconds: 75);
-
-    if (sameMember && recentEnough) {
-      return;
-    }
-
-    _lastVisitPingMemberId = sessionMember.id;
-    _lastVisitPingAt = now;
-
-    try {
-      await _repository.recordCurrentMemberVisit();
-    } catch (_) {
-      // Ziyaret takibi acilmamis olsa bile uygulama akisi bozulmasin.
-    }
-  }
-
-  Future<_AdminVisitLoadResult> _fetchAdminVisitLoadResult() async {
-    try {
-      final entries = await _repository.fetchMemberVisits();
-      return _AdminVisitLoadResult(entries: entries, errorMessage: '');
-    } catch (_) {
-      return const _AdminVisitLoadResult(
-        entries: [],
-        errorMessage: 'Giris takibi simdilik yuklenemedi.',
-      );
-    }
-  }
-
-  Future<void> _refreshAdminVisitEntries() async {
-    if (!_isAdmin) {
-      return;
-    }
-
-    final visitLoad = await _fetchAdminVisitLoadResult();
-
-    if (!mounted) {
-      return;
-    }
-
-    setState(() {
-      _memberVisits = visitLoad.entries;
-      _visitError = visitLoad.errorMessage;
-    });
   }
 
   void _syncPendingTimer() {
@@ -620,24 +620,101 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  void _syncVisitHeartbeat(String? memberId) {
-    _visitHeartbeatTimer?.cancel();
-
-    if (memberId == null) {
+  Future<void> _logPageAccessIfNeeded(Member sessionMember) async {
+    if (_pageAccessLoggedMemberId == sessionMember.id) {
       return;
     }
 
-    _visitHeartbeatTimer = Timer.periodic(
-      const Duration(seconds: 90),
-      (_) {
-        final currentMember = _currentMember;
-        if (currentMember == null) {
-          return;
-        }
+    _pageAccessLoggedMemberId = sessionMember.id;
 
-        unawaited(_recordVisitIfNeeded(currentMember));
-      },
-    );
+    try {
+      await _repository.logMemberActivity(
+        actionType: 'app_open',
+        targetType: 'app',
+        details: {
+          'username': sessionMember.label,
+          'approved': sessionMember.approved,
+        },
+      );
+    } catch (_) {
+      // Log akisi acilmamis olsa da ana ekran yuklensin.
+    }
+  }
+
+  Future<void> _loadMemberActivityLogs(String memberId) async {
+    if (!_isAdmin) {
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isLoadingMemberActivity = true;
+        _activityLogError = '';
+      });
+    }
+
+    try {
+      final entries = await _repository.fetchMemberActivityLogs(memberId);
+
+      if (!mounted || _openMemberVisitsMemberId != memberId) {
+        return;
+      }
+
+      setState(() {
+        _memberActivityLogs = entries;
+        _activityLogError = '';
+      });
+    } catch (_) {
+      if (!mounted || _openMemberVisitsMemberId != memberId) {
+        return;
+      }
+
+      setState(() {
+        _memberActivityLogs = const [];
+        _activityLogError = 'Islem kayitlari simdilik yuklenemedi.';
+      });
+    } finally {
+      if (mounted && _openMemberVisitsMemberId == memberId) {
+        setState(() {
+          _isLoadingMemberActivity = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _handleSessionTimeout() async {
+    if (_isTimingOutSession || _sessionMemberId == null) {
+      return;
+    }
+
+    _isTimingOutSession = true;
+
+    try {
+      try {
+        await _repository.logMemberActivity(
+          actionType: 'session_timeout',
+          targetType: 'auth',
+        );
+      } catch (_) {
+        // Timeout logu atilamasa da cikis aksin.
+      }
+
+      await _repository.signOutRemote(logAction: false);
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _loginError =
+            'Uzun sure islem yapilmadigi icin tekrar giris yapman gerekiyor.';
+      });
+      _showError(_loginError);
+    } catch (_) {
+      // Oturum zaman asimi logout denemesi sessizce gecsin.
+    } finally {
+      _isTimingOutSession = false;
+    }
   }
 
   void _openSuggestionModal(String suggestionId) {
@@ -645,12 +722,30 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    final suggestion = _findSuggestionById(suggestionId);
+
     setState(() {
       _selectedSuggestionId = suggestionId;
       _editingSuggestionId = null;
       _openSuggestionModalId = suggestionId;
+      _openSuggestionAssetPreviewId = null;
       _openMemberVisitsMemberId = null;
     });
+
+    _markInteraction();
+
+    if (suggestion != null) {
+      unawaited(
+        _safeLogActivity(
+          actionType: 'suggestion_view',
+          targetType: 'suggestion',
+          targetId: suggestion.id,
+          details: {
+            'suggestion_title': suggestion.title,
+          },
+        ),
+      );
+    }
   }
 
   void _closeSuggestionModal() {
@@ -661,7 +756,10 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _editingSuggestionId = null;
       _openSuggestionModalId = null;
+      _openSuggestionAssetPreviewId = null;
     });
+
+    _markInteraction();
   }
 
   void _openMemberVisitsModal(String memberId) {
@@ -672,9 +770,14 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _openMemberVisitsMemberId = memberId;
       _openSuggestionModalId = null;
+      _openSuggestionAssetPreviewId = null;
+      _memberActivityLogs = const [];
+      _activityLogError = '';
+      _isLoadingMemberActivity = true;
     });
 
-    unawaited(_refreshAdminVisitEntries());
+    _markInteraction();
+    unawaited(_loadMemberActivityLogs(memberId));
   }
 
   void _closeMemberVisitsModal() {
@@ -684,12 +787,56 @@ class _HomePageState extends State<HomePage> {
 
     setState(() {
       _openMemberVisitsMemberId = null;
+      _memberActivityLogs = const [];
+      _activityLogError = '';
+      _isLoadingMemberActivity = false;
     });
+
+    _markInteraction();
+  }
+
+  void _openSuggestionAssetPreview(SuggestionAsset asset) {
+    if (!mounted) {
+      return;
+    }
+
+    final suggestion = _findSuggestionById(asset.suggestionId);
+
+    setState(() {
+      _openSuggestionAssetPreviewId = asset.id;
+    });
+
+    _markInteraction();
+    unawaited(
+      _safeLogActivity(
+        actionType: 'asset_view',
+        targetType: 'suggestion_asset',
+        targetId: asset.id,
+        details: {
+          'asset_name': asset.fileName,
+          'suggestion_id': asset.suggestionId,
+          'suggestion_title': suggestion?.title ?? '',
+        },
+      ),
+    );
+  }
+
+  void _closeSuggestionAssetPreview() {
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _openSuggestionAssetPreviewId = null;
+    });
+
+    _markInteraction();
   }
 
   Future<void> _handleLogin() async {
     final username = _loginUsernameController.text;
     final password = _loginPasswordController.text;
+    _markInteraction();
 
     if (!isValidUsername(username)) {
       setState(() {
@@ -734,6 +881,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _handleRegister() async {
     final username = _registerUsernameController.text;
     final password = _registerPasswordController.text;
+    _markInteraction();
 
     if (!isValidUsername(username)) {
       setState(() {
@@ -781,6 +929,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _handleLogout() async {
+    _markInteraction();
     setState(() {
       _isSubmitting = true;
       _editingSuggestionId = null;
@@ -811,6 +960,7 @@ class _HomePageState extends State<HomePage> {
     final currentMember = _currentMember;
     final title = _suggestionTitleController.text.trim();
     final note = _suggestionNoteController.text.trim();
+    _markInteraction();
 
     if (currentMember == null || !_canParticipate) {
       setState(() {
@@ -843,6 +993,15 @@ class _HomePageState extends State<HomePage> {
     try {
       final insertedSuggestion =
           await _repository.addRemoteSuggestion(title, note);
+      await _safeLogActivity(
+        actionType: 'suggestion_create',
+        targetType: 'suggestion',
+        targetId: insertedSuggestion.id,
+        details: {
+          'suggestion_title': insertedSuggestion.title,
+          'note_length': insertedSuggestion.note.length,
+        },
+      );
       _suggestionTitleController.clear();
       _suggestionNoteController.clear();
       _selectedSuggestionId = insertedSuggestion.id;
@@ -864,6 +1023,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _handleVote(String suggestionId, int value) async {
+    _markInteraction();
+
     if (!_canParticipate) {
       return;
     }
@@ -883,6 +1044,15 @@ class _HomePageState extends State<HomePage> {
 
     try {
       await _repository.upsertRemoteVote(suggestionId, clampVote(value));
+      await _safeLogActivity(
+        actionType: 'vote_set',
+        targetType: 'suggestion',
+        targetId: suggestionId,
+        details: {
+          'suggestion_title': suggestion.title,
+          'vote_value': clampVote(value),
+        },
+      );
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
       _showError(getAuthErrorMessage(error));
@@ -896,12 +1066,23 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _handleClearVote(String suggestionId) async {
+    _markInteraction();
+    final suggestion = _findSuggestionById(suggestionId);
+
     setState(() {
       _isSubmitting = true;
     });
 
     try {
       await _repository.deleteRemoteVote(suggestionId);
+      await _safeLogActivity(
+        actionType: 'vote_clear',
+        targetType: 'suggestion',
+        targetId: suggestionId,
+        details: {
+          'suggestion_title': suggestion?.title ?? '',
+        },
+      );
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
       _showError(getAuthErrorMessage(error));
@@ -917,6 +1098,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> _handleCommentSubmit(String suggestionId) async {
     final controller = _commentControllerFor(suggestionId);
     final message = controller.text.trim();
+    final suggestion = _findSuggestionById(suggestionId);
+    _markInteraction();
 
     if (!_canParticipate) {
       return;
@@ -933,6 +1116,16 @@ class _HomePageState extends State<HomePage> {
 
     try {
       await _repository.addRemoteComment(suggestionId, message);
+      await _safeLogActivity(
+        actionType: 'comment_create',
+        targetType: 'suggestion',
+        targetId: suggestionId,
+        details: {
+          'suggestion_title': suggestion?.title ?? '',
+          'comment_preview':
+              message.length > 60 ? '${message.substring(0, 60)}...' : message,
+        },
+      );
       controller.clear();
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
@@ -947,6 +1140,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _handleDeleteSuggestion(String suggestionId) async {
+    final suggestion = _findSuggestionById(suggestionId);
     final shouldDelete =
         await _confirmAction('Bu oneriyi silmek istiyor musun?');
 
@@ -960,8 +1154,22 @@ class _HomePageState extends State<HomePage> {
 
     try {
       await _repository.deleteRemoteSuggestion(suggestionId);
+      await _safeLogActivity(
+        actionType: 'suggestion_delete',
+        targetType: 'suggestion',
+        targetId: suggestionId,
+        details: {
+          'suggestion_title': suggestion?.title ?? '',
+        },
+      );
       if (_selectedSuggestionId == suggestionId) {
         _selectedSuggestionId = null;
+      }
+      final previewAsset = _openSuggestionAssetPreviewId == null
+          ? null
+          : _findSuggestionAssetById(_openSuggestionAssetPreviewId!);
+      if (previewAsset?.suggestionId == suggestionId) {
+        _openSuggestionAssetPreviewId = null;
       }
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
@@ -991,6 +1199,8 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _handleSuggestionNoteSave(String suggestionId) async {
     final nextNote = _editingSuggestionNoteController.text.trim();
+    final suggestion = _findSuggestionById(suggestionId);
+    _markInteraction();
 
     setState(() {
       _isSubmitting = true;
@@ -998,6 +1208,15 @@ class _HomePageState extends State<HomePage> {
 
     try {
       await _repository.updateRemoteSuggestionNote(suggestionId, nextNote);
+      await _safeLogActivity(
+        actionType: 'suggestion_note_update',
+        targetType: 'suggestion',
+        targetId: suggestionId,
+        details: {
+          'suggestion_title': suggestion?.title ?? '',
+          'note_length': nextNote.length,
+        },
+      );
       _editingSuggestionId = null;
       _editingSuggestionNoteController.clear();
       await _hydrateRemoteState(showLoading: false);
@@ -1017,6 +1236,7 @@ class _HomePageState extends State<HomePage> {
     List<PickedSvgFile> pickedFiles,
   ) async {
     final suggestion = _findSuggestionById(suggestionId);
+    _markInteraction();
 
     if (suggestion == null) {
       _showError('Oneri bulunamadi.');
@@ -1075,6 +1295,15 @@ class _HomePageState extends State<HomePage> {
           fileName: file.name,
           bytes: file.bytes,
         );
+        await _safeLogActivity(
+          actionType: 'asset_upload',
+          targetType: 'suggestion_asset',
+          targetId: suggestionId,
+          details: {
+            'suggestion_title': suggestion.title,
+            'asset_name': file.name,
+          },
+        );
       }
       _showNotice(
         'SVG dosyasi eklendi.',
@@ -1092,6 +1321,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _handleSuggestionAssetUpload(String suggestionId) async {
+    _markInteraction();
     final pickedFiles = await pickSvgFiles(allowMultiple: false);
 
     if (pickedFiles == null || pickedFiles.isEmpty) {
@@ -1102,6 +1332,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _handleDeleteSuggestionAsset(SuggestionAsset asset) async {
+    final suggestion = _findSuggestionById(asset.suggestionId);
     if (!_canDeleteSuggestionAsset(asset)) {
       return;
     }
@@ -1120,6 +1351,20 @@ class _HomePageState extends State<HomePage> {
 
     try {
       await _repository.deleteSuggestionAsset(asset);
+      await _safeLogActivity(
+        actionType: 'asset_delete',
+        targetType: 'suggestion_asset',
+        targetId: asset.id,
+        details: {
+          'suggestion_title': suggestion?.title ?? '',
+          'asset_name': asset.fileName,
+        },
+      );
+      if (_openSuggestionAssetPreviewId == asset.id && mounted) {
+        setState(() {
+          _openSuggestionAssetPreviewId = null;
+        });
+      }
       _showNotice('SVG dosyasi silindi.');
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
@@ -1134,6 +1379,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _handleDeleteComment(String commentId) async {
+    final comment = _appData.comments.cast<CommentEntry?>().firstWhere(
+          (entry) => entry?.id == commentId,
+          orElse: () => null,
+        );
+    final suggestion =
+        comment == null ? null : _findSuggestionById(comment.suggestionId);
     final shouldDelete =
         await _confirmAction('Bu yorumu silmek istiyor musun?');
 
@@ -1147,6 +1398,19 @@ class _HomePageState extends State<HomePage> {
 
     try {
       await _repository.deleteRemoteComment(commentId);
+      await _safeLogActivity(
+        actionType: 'comment_delete',
+        targetType: 'comment',
+        targetId: commentId,
+        details: {
+          'suggestion_title': suggestion?.title ?? '',
+          'comment_preview': comment == null
+              ? ''
+              : (comment.message.length > 60
+                  ? '${comment.message.substring(0, 60)}...'
+                  : comment.message),
+        },
+      );
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
       _showError(getAuthErrorMessage(error));
@@ -1160,6 +1424,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _handleApproval(String memberId, bool approved) async {
+    final member = _memberById(memberId) ??
+        _pendingMembers.cast<Member?>().firstWhere(
+              (entry) => entry?.id == memberId,
+              orElse: () => null,
+            );
+    _markInteraction();
     setState(() {
       _adminError = '';
       _isSubmitting = true;
@@ -1167,6 +1437,14 @@ class _HomePageState extends State<HomePage> {
 
     try {
       await _repository.updateMemberApproval(memberId, approved);
+      await _safeLogActivity(
+        actionType: approved ? 'member_approve' : 'member_reject',
+        targetType: 'member',
+        targetId: memberId,
+        details: {
+          'member_username': member?.label ?? '',
+        },
+      );
       _showNotice('Uye onaylandi.');
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
@@ -1186,6 +1464,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _handleRejectMember(String memberId) async {
+    final member = _memberById(memberId) ??
+        _pendingMembers.cast<Member?>().firstWhere(
+              (entry) => entry?.id == memberId,
+              orElse: () => null,
+            );
+    _markInteraction();
     final shouldReject = await _confirmAction(
       'Bu kaydi tamamen reddetmek istiyor musun?',
     );
@@ -1201,6 +1485,14 @@ class _HomePageState extends State<HomePage> {
 
     try {
       await _repository.deleteRemoteMember(memberId);
+      await _safeLogActivity(
+        actionType: 'member_reject',
+        targetType: 'member',
+        targetId: memberId,
+        details: {
+          'member_username': member?.label ?? '',
+        },
+      );
       _showNotice('Kayit reddedildi.');
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
@@ -1224,6 +1516,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    _markInteraction();
     final shouldDelete = await _confirmAction(
       '@${member.label} kullanicisini tamamen silmek istiyor musun? Bu islem oylarini, yorumlarini, onerilerini ve yukledigi SVG dosyalarini kaldirir.',
     );
@@ -1239,9 +1532,20 @@ class _HomePageState extends State<HomePage> {
 
     try {
       await _repository.deleteRemoteMember(member.id);
+      await _safeLogActivity(
+        actionType: 'member_delete',
+        targetType: 'member',
+        targetId: member.id,
+        details: {
+          'member_username': member.label,
+        },
+      );
       if (mounted) {
         setState(() {
           _openMemberVisitsMemberId = null;
+          _memberActivityLogs = const [];
+          _activityLogError = '';
+          _isLoadingMemberActivity = false;
         });
       }
       _showNotice('Uye silindi.');
@@ -1453,11 +1757,133 @@ class _HomePageState extends State<HomePage> {
     return _membersById[memberId];
   }
 
-  List<MemberVisitEntry> _memberVisitsFor(String memberId) {
-    final visits =
-        _memberVisits.where((visit) => visit.memberId == memberId).toList();
-    visits.sort((left, right) => right.createdAt.compareTo(left.createdAt));
-    return visits;
+  Future<void> _safeLogActivity({
+    required String actionType,
+    String targetType = '',
+    String? targetId,
+    Map<String, dynamic>? details,
+  }) async {
+    try {
+      await _repository.logMemberActivity(
+        actionType: actionType,
+        targetType: targetType,
+        targetId: targetId,
+        details: details,
+      );
+    } catch (_) {
+      // Log yazilamasa da ana is akisi bozulmasin.
+    }
+  }
+
+  String _detailText(Map<String, dynamic> details, String key) {
+    final value = details[key];
+    if (value == null) {
+      return '';
+    }
+
+    return value.toString().trim();
+  }
+
+  String _activityTitle(MemberActivityLogEntry entry) {
+    switch (entry.actionType) {
+      case 'login_success':
+        return 'Giris yapti';
+      case 'signup_completed':
+        return 'Kaydini tamamladi';
+      case 'logout':
+        return 'Cikis yapti';
+      case 'session_timeout':
+        return 'Oturumu zaman asimina ugradi';
+      case 'app_open':
+        return 'Siteyi acti';
+      case 'suggestion_view':
+        return 'Bir oneriyi inceledi';
+      case 'suggestion_create':
+        return 'Oneri ekledi';
+      case 'suggestion_note_update':
+        return 'Oneri notunu guncelledi';
+      case 'suggestion_delete':
+        return 'Oneri sildi';
+      case 'vote_set':
+        return 'Puan verdi';
+      case 'vote_clear':
+        return 'Verdigi puani geri aldi';
+      case 'comment_create':
+        return 'Yorum ekledi';
+      case 'comment_delete':
+        return 'Yorumu sildi';
+      case 'asset_upload':
+        return 'SVG yukledi';
+      case 'asset_view':
+        return 'SVG onizlemesini acti';
+      case 'asset_delete':
+        return 'SVG sildi';
+      case 'member_approve':
+        return 'Uyeyi onayladi';
+      case 'member_reject':
+        return 'Uyelik kaydini reddetti';
+      case 'member_delete':
+        return 'Uyeyi tamamen sildi';
+      default:
+        return entry.actionType.replaceAll('_', ' ');
+    }
+  }
+
+  String _activitySubtitle(MemberActivityLogEntry entry) {
+    final suggestionTitle = _detailText(entry.details, 'suggestion_title');
+    final username = _detailText(entry.details, 'username');
+    final memberUsername = _detailText(entry.details, 'member_username');
+    final voteValue = _detailText(entry.details, 'vote_value');
+    final assetName = _detailText(entry.details, 'asset_name');
+    final commentPreview = _detailText(entry.details, 'comment_preview');
+
+    switch (entry.actionType) {
+      case 'login_success':
+      case 'signup_completed':
+        return username.isEmpty ? 'Hesap oturumu acildi.' : '@$username';
+      case 'logout':
+      case 'session_timeout':
+      case 'app_open':
+        return '';
+      case 'suggestion_view':
+      case 'suggestion_create':
+      case 'suggestion_note_update':
+      case 'suggestion_delete':
+        return suggestionTitle.isEmpty ? 'Oneri kaydi' : suggestionTitle;
+      case 'vote_set':
+        final voteText = voteValue.isEmpty ? '' : '$voteValue puan';
+        if (suggestionTitle.isEmpty) {
+          return voteText;
+        }
+        return voteText.isEmpty ? suggestionTitle : '$suggestionTitle - $voteText';
+      case 'vote_clear':
+        return suggestionTitle.isEmpty ? '' : suggestionTitle;
+      case 'comment_create':
+      case 'comment_delete':
+        if (suggestionTitle.isNotEmpty && commentPreview.isNotEmpty) {
+          return '$suggestionTitle - "$commentPreview"';
+        }
+        if (commentPreview.isNotEmpty) {
+          return '"$commentPreview"';
+        }
+        return suggestionTitle;
+      case 'asset_upload':
+      case 'asset_view':
+      case 'asset_delete':
+        if (suggestionTitle.isNotEmpty && assetName.isNotEmpty) {
+          return '$suggestionTitle - $assetName';
+        }
+        if (assetName.isNotEmpty) {
+          return assetName;
+        }
+        return suggestionTitle;
+      case 'member_approve':
+      case 'member_reject':
+      case 'member_delete':
+        return memberUsername.isEmpty ? '' : '@$memberUsername';
+      default:
+        return '';
+    }
   }
 
   void _showNotice(String message) {
@@ -1515,114 +1941,136 @@ class _HomePageState extends State<HomePage> {
     final modalSuggestion = _openSuggestionModalId == null
         ? null
         : _findSuggestionById(_openSuggestionModalId!);
+    final previewAsset = _openSuggestionAssetPreviewId == null
+        ? null
+        : _findSuggestionAssetById(_openSuggestionAssetPreviewId!);
     final memberVisitsModalMember = _openMemberVisitsMemberId == null
         ? null
         : _memberById(_openMemberVisitsMemberId!);
 
-    return Scaffold(
-      body: Stack(
-        children: [
-          const Positioned.fill(child: _AmbientBackdrop()),
-          SafeArea(
-            child: _isBooting
-                ? const Center(child: CircularProgressIndicator())
-                : LayoutBuilder(
-                    builder: (context, constraints) {
-                      final isWide = constraints.maxWidth >= 1120;
-                      final primaryColumn = [
-                        _buildAccountPanel(context),
-                        if (_isAdmin) _buildPendingMembersPanel(context),
-                        if (!_pendingOnlyMode)
-                          _buildSuggestionComposerPanel(context),
-                        if (!_pendingOnlyMode) _buildMembersPanel(context),
-                      ];
-                      final secondaryColumn = !_pendingOnlyMode
-                          ? [_buildSuggestionListPanel(context)]
-                          : const <Widget>[];
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) => _markInteraction(),
+      onPointerSignal: (_) => _markInteraction(),
+      child: Scaffold(
+        body: Stack(
+          children: [
+            const Positioned.fill(child: _AmbientBackdrop()),
+            SafeArea(
+              child: _isBooting
+                  ? const Center(child: CircularProgressIndicator())
+                  : LayoutBuilder(
+                      builder: (context, constraints) {
+                        final isWide = constraints.maxWidth >= 1120;
+                        final primaryColumn = [
+                          _buildAccountPanel(context),
+                          if (_isAdmin) _buildPendingMembersPanel(context),
+                          if (!_pendingOnlyMode)
+                            _buildSuggestionComposerPanel(context),
+                          if (!_pendingOnlyMode) _buildMembersPanel(context),
+                        ];
+                        final secondaryColumn = !_pendingOnlyMode
+                            ? [_buildSuggestionListPanel(context)]
+                            : const <Widget>[];
 
-                      return ScrollConfiguration(
-                        behavior: const MaterialScrollBehavior().copyWith(
-                          scrollbars: false,
-                        ),
-                        child: SingleChildScrollView(
-                          padding: const EdgeInsets.fromLTRB(16, 18, 16, 40),
-                          child: Center(
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 1360),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  _buildHero(
-                                    context,
-                                    approvedMemberCount: approvedMemberCount,
-                                  ),
-                                  const SizedBox(height: 22),
-                                  if (isWide && !_pendingOnlyMode)
-                                    Row(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Expanded(
-                                          flex: 10,
-                                          child: Column(
-                                            children: _withGaps(primaryColumn),
-                                          ),
-                                        ),
-                                        const SizedBox(width: 20),
-                                        Expanded(
-                                          flex: 14,
-                                          child: Column(
-                                            children:
-                                                _withGaps(secondaryColumn),
-                                          ),
-                                        ),
-                                      ],
-                                    )
-                                  else
-                                    Column(
-                                      children: _withGaps([
-                                        ...primaryColumn,
-                                        ...secondaryColumn,
-                                      ]),
+                        return ScrollConfiguration(
+                          behavior: const MaterialScrollBehavior().copyWith(
+                            scrollbars: false,
+                          ),
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.fromLTRB(16, 18, 16, 40),
+                            child: Center(
+                              child: ConstrainedBox(
+                                constraints:
+                                    const BoxConstraints(maxWidth: 1360),
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    _buildHero(
+                                      context,
+                                      approvedMemberCount: approvedMemberCount,
                                     ),
-                                ],
+                                    const SizedBox(height: 22),
+                                    if (isWide && !_pendingOnlyMode)
+                                      Row(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Expanded(
+                                            flex: 10,
+                                            child: Column(
+                                              children:
+                                                  _withGaps(primaryColumn),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 20),
+                                          Expanded(
+                                            flex: 14,
+                                            child: Column(
+                                              children:
+                                                  _withGaps(secondaryColumn),
+                                            ),
+                                          ),
+                                        ],
+                                      )
+                                    else
+                                      Column(
+                                        children: _withGaps([
+                                          ...primaryColumn,
+                                          ...secondaryColumn,
+                                        ]),
+                                      ),
+                                  ],
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      );
-                    },
-                  ),
-          ),
-          if (modalSuggestion != null)
-            Positioned.fill(
-              child: _SuggestionOverlay(
-                onClose: _closeSuggestionModal,
-                child: _buildSuggestionPopupFrame(
-                  context,
-                  modalSuggestion,
-                  compact: MediaQuery.of(context).size.width < 860,
-                  onRefresh: () {
-                    if (mounted) {
-                      setState(() {});
-                    }
-                  },
+                        );
+                      },
+                    ),
+            ),
+            if (modalSuggestion != null)
+              Positioned.fill(
+                child: _SuggestionOverlay(
                   onClose: _closeSuggestionModal,
+                  child: _buildSuggestionPopupFrame(
+                    context,
+                    modalSuggestion,
+                    compact: MediaQuery.of(context).size.width < 860,
+                    onRefresh: () {
+                      if (mounted) {
+                        setState(() {});
+                      }
+                    },
+                    onClose: _closeSuggestionModal,
+                  ),
                 ),
               ),
-            ),
-          if (memberVisitsModalMember != null)
-            Positioned.fill(
-              child: _SuggestionOverlay(
-                onClose: _closeMemberVisitsModal,
-                child: _buildMemberVisitsPopupFrame(
-                  context,
-                  memberVisitsModalMember,
-                  compact: MediaQuery.of(context).size.width < 860,
+            if (memberVisitsModalMember != null)
+              Positioned.fill(
+                child: _SuggestionOverlay(
+                  onClose: _closeMemberVisitsModal,
+                  child: _buildMemberVisitsPopupFrame(
+                    context,
+                    memberVisitsModalMember,
+                    compact: MediaQuery.of(context).size.width < 860,
+                  ),
                 ),
               ),
-            ),
-        ],
+            if (previewAsset != null)
+              Positioned.fill(
+                child: _SuggestionOverlay(
+                  onClose: _closeSuggestionAssetPreview,
+                  child: _buildSuggestionAssetPreviewFrame(
+                    context,
+                    previewAsset,
+                    compact: MediaQuery.of(context).size.width < 860,
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -2160,10 +2608,6 @@ class _HomePageState extends State<HomePage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (_isAdmin && _visitError.isNotEmpty) ...[
-            _InlineMessage(message: _visitError, color: _dangerColor),
-            const SizedBox(height: 12),
-          ],
           if (_appData.members.isEmpty)
             Text(
               'Kayit olmadan bilgileri goremezsiniz.',
@@ -2197,8 +2641,8 @@ class _HomePageState extends State<HomePage> {
     Member member, {
     required bool compact,
   }) {
-    final memberVisits = _memberVisitsFor(member.id);
     final canDeleteMember = _canAdminDeleteMember(member);
+    final memberActivityLogs = _memberActivityLogs;
 
     return Container(
       decoration: BoxDecoration(
@@ -2237,7 +2681,7 @@ class _HomePageState extends State<HomePage> {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        'Giris gecmisi',
+                        'Islem gecmisi',
                         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                               color: _mutedColor,
                             ),
@@ -2280,22 +2724,34 @@ class _HomePageState extends State<HomePage> {
                   _InlineMessage(message: _adminError, color: _dangerColor),
                   const SizedBox(height: 12),
                 ],
+                if (_activityLogError.isNotEmpty) ...[
+                  _InlineMessage(
+                    message: _activityLogError,
+                    color: _dangerColor,
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 Wrap(
                   spacing: 8,
                   runSpacing: 8,
                   children: [
-                    _MetaPill(label: '${memberVisits.length} giris'),
+                    _MetaPill(label: '${memberActivityLogs.length} islem'),
                     _MetaPill(
-                      label: memberVisits.isEmpty
+                      label: memberActivityLogs.isEmpty
                           ? 'Henuz yok'
-                          : 'Son giris ${formatDate(memberVisits.first.createdAt)}',
+                          : 'Son islem ${formatDate(memberActivityLogs.first.createdAt)}',
                     ),
                   ],
                 ),
                 const SizedBox(height: 18),
-                if (memberVisits.isEmpty)
+                if (_isLoadingMemberActivity)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 28),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (memberActivityLogs.isEmpty)
                   Text(
-                    'Bu uye icin henuz giris kaydi yok.',
+                    'Bu uye icin henuz kaydedilmis bir islem yok.',
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                           color: _mutedColor,
                         ),
@@ -2303,17 +2759,154 @@ class _HomePageState extends State<HomePage> {
                 else
                   Column(
                     children: [
-                      for (var index = 0; index < memberVisits.length; index++) ...[
-                        _MemberVisitEventRow(
-                          memberLabel: member.label,
-                          createdAt: memberVisits[index].createdAt,
+                      for (var index = 0;
+                          index < memberActivityLogs.length;
+                          index++) ...[
+                        _MemberActivityEventRow(
+                          title: _activityTitle(memberActivityLogs[index]),
+                          subtitle: _activitySubtitle(memberActivityLogs[index]),
+                          createdAt: memberActivityLogs[index].createdAt,
                         ),
-                        if (index != memberVisits.length - 1)
+                        if (index != memberActivityLogs.length - 1)
                           const SizedBox(height: 10),
                       ],
                     ],
                   ),
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSuggestionAssetPreviewFrame(
+    BuildContext context,
+    SuggestionAsset asset, {
+    required bool compact,
+  }) {
+    final suggestion = _findSuggestionById(asset.suggestionId);
+    final imageUrl = _repository.getSuggestionAssetPublicUrl(asset.storagePath);
+
+    return Container(
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [
+            Color(0xFFFFFEFB),
+            Color(0xFFF8F3EA),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(compact ? 28 : 34),
+        border: Border.all(color: _borderColor),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x26111E1A),
+            blurRadius: 34,
+            offset: Offset(0, 22),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              compact ? 20 : 26,
+              compact ? 18 : 22,
+              compact ? 16 : 20,
+              0,
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        suggestion?.title ?? 'SVG onizleme',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            Theme.of(context).textTheme.headlineSmall?.copyWith(
+                                  color: _primaryColor,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        asset.fileName,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: _mutedColor,
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                IconButton(
+                  onPressed: _closeSuggestionAssetPreview,
+                  tooltip: 'Kapat',
+                  icon: const Icon(Icons.close_rounded),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                compact ? 18 : 26,
+                0,
+                compact ? 18 : 26,
+                compact ? 18 : 24,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      const _MetaPill(label: 'SVG onizleme'),
+                      _MetaPill(label: formatDate(asset.createdAt)),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Expanded(
+                    child: Container(
+                      width: double.infinity,
+                      padding: EdgeInsets.all(compact ? 18 : 26),
+                      decoration: BoxDecoration(
+                        color: _surfaceAlt,
+                        borderRadius: BorderRadius.circular(26),
+                        border:
+                            Border.all(color: _borderColor.withValues(alpha: 0.9)),
+                      ),
+                      child: InteractiveViewer(
+                        minScale: 0.8,
+                        maxScale: 4,
+                        child: Center(
+                          child: SvgPicture.network(
+                            imageUrl,
+                            fit: BoxFit.contain,
+                            placeholderBuilder: (context) => const Center(
+                              child: SizedBox(
+                                width: 28,
+                                height: 28,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.4,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -2562,6 +3155,8 @@ class _HomePageState extends State<HomePage> {
                                       _repository.getSuggestionAssetPublicUrl(
                                     asset.storagePath,
                                   ),
+                                  onPreview: () =>
+                                      _openSuggestionAssetPreview(asset),
                                   canDelete: _canDeleteSuggestionAsset(asset),
                                   onDelete: _isSubmitting
                                       ? null
@@ -3569,7 +4164,7 @@ class _MemberBadge extends StatelessWidget {
           if (isClickable) ...[
             const SizedBox(height: 6),
             Text(
-              'Girisleri gor',
+              'Islemleri gor',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: _accentColor,
                     fontWeight: FontWeight.w700,
@@ -3592,13 +4187,15 @@ class _MemberBadge extends StatelessWidget {
   }
 }
 
-class _MemberVisitEventRow extends StatelessWidget {
-  const _MemberVisitEventRow({
-    required this.memberLabel,
+class _MemberActivityEventRow extends StatelessWidget {
+  const _MemberActivityEventRow({
+    required this.title,
+    required this.subtitle,
     required this.createdAt,
   });
 
-  final String memberLabel;
+  final String title;
+  final String subtitle;
   final DateTime createdAt;
 
   @override
@@ -3612,16 +4209,33 @@ class _MemberVisitEventRow extends StatelessWidget {
         border: Border.all(color: _borderColor.withValues(alpha: 0.9)),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Expanded(
-            child: Text(
-              '@$memberLabel',
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                    color: _primaryColor,
-                    fontWeight: FontWeight.w700,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                        color: _primaryColor,
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+                if (subtitle.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: _mutedColor,
+                          height: 1.45,
+                        ),
                   ),
+                ],
+              ],
             ),
           ),
+          const SizedBox(width: 12),
           Text(
             formatDate(createdAt),
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -4024,12 +4638,14 @@ class _SuggestionAssetCard extends StatelessWidget {
   const _SuggestionAssetCard({
     required this.asset,
     required this.imageUrl,
+    required this.onPreview,
     required this.canDelete,
     required this.onDelete,
   });
 
   final SuggestionAsset asset;
   final String imageUrl;
+  final VoidCallback onPreview;
   final bool canDelete;
   final VoidCallback? onDelete;
 
@@ -4075,24 +4691,74 @@ class _SuggestionAssetCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 8),
-          AspectRatio(
-            aspectRatio: 1,
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: _surfaceAlt,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: _borderColor.withValues(alpha: 0.9)),
-              ),
-              child: SvgPicture.network(
-                imageUrl,
-                fit: BoxFit.contain,
-                placeholderBuilder: (context) => const Center(
-                  child: SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(strokeWidth: 2.2),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onPreview,
+              borderRadius: BorderRadius.circular(18),
+              child: AspectRatio(
+                aspectRatio: 1,
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: _surfaceAlt,
+                    borderRadius: BorderRadius.circular(18),
+                    border:
+                        Border.all(color: _borderColor.withValues(alpha: 0.9)),
+                  ),
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: SvgPicture.network(
+                          imageUrl,
+                          fit: BoxFit.contain,
+                          placeholderBuilder: (context) => const Center(
+                            child: SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2.2),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        right: 6,
+                        bottom: 6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.88),
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(color: _borderColor),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.open_in_full_rounded,
+                                size: 14,
+                                color: _primaryColor,
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                'Buyut',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.copyWith(
+                                      color: _primaryColor,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -4143,18 +4809,4 @@ class _EmptyState extends StatelessWidget {
       ],
     );
   }
-}
-
-class _AdminVisitLoadResult {
-  const _AdminVisitLoadResult({
-    required this.entries,
-    required this.errorMessage,
-  });
-
-  const _AdminVisitLoadResult.empty()
-      : entries = const [],
-        errorMessage = '';
-
-  final List<MemberVisitEntry> entries;
-  final String errorMessage;
 }
