@@ -2,7 +2,7 @@
 {{flutter_build_config}}
 
 (function () {
-  const buildVersion = "{{flutter_service_worker_version}}";
+  const buildVersion = String({{flutter_service_worker_version}});
 
   if (window._flutter?.buildConfig?.builds) {
     window._flutter.buildConfig.builds = window._flutter.buildConfig.builds.map(
