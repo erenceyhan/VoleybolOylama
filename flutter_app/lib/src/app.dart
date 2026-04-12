@@ -9,6 +9,7 @@ import 'auth_utils.dart';
 import 'browser_context.dart';
 import 'models.dart';
 import 'repository.dart';
+import 'session_activity_store.dart' as session_activity_store;
 import 'svg_picker.dart';
 import 'svg_picker_types.dart';
 
@@ -292,7 +293,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   late final AppRepository _repository;
   StreamSubscription<AuthState>? _authSubscription;
   Timer? _pendingRefreshTimer;
@@ -326,10 +327,13 @@ class _HomePageState extends State<HomePage> {
   bool _isLoadingMemberActivity = false;
   bool _isTimingOutSession = false;
   String? _pageAccessLoggedMemberId;
+  DateTime? _lastInteractionAt;
+  String? _lastInteractionMemberId;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _repository = AppRepository(Supabase.instance.client);
     _registerInteractionController(_loginUsernameController);
     _registerInteractionController(_loginPasswordController);
@@ -346,6 +350,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _authSubscription?.cancel();
     _pendingRefreshTimer?.cancel();
     _sessionTimeoutTimer?.cancel();
@@ -483,7 +488,16 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    _restartSessionTimeout();
+    final now = DateTime.now().toUtc();
+    final lastInteractionAt = _lastInteractionAt;
+
+    if (lastInteractionAt != null &&
+        now.difference(lastInteractionAt) >= _sessionInactivityTimeout) {
+      unawaited(_handleSessionTimeout());
+      return;
+    }
+
+    _rememberLastInteraction(at: now);
   }
 
   void _restartSessionTimeout() {
@@ -497,6 +511,72 @@ class _HomePageState extends State<HomePage> {
       _sessionInactivityTimeout,
       () => unawaited(_handleSessionTimeout()),
     );
+  }
+
+  void _rememberLastInteraction({DateTime? at}) {
+    final memberId = _sessionMemberId;
+    if (memberId == null || _isTimingOutSession) {
+      return;
+    }
+
+    final timestamp = (at ?? DateTime.now()).toUtc();
+    _lastInteractionAt = timestamp;
+    _lastInteractionMemberId = memberId;
+    session_activity_store.writeLastInteractionAt(memberId, timestamp);
+    _restartSessionTimeout();
+  }
+
+  void _loadStoredInteraction(String memberId) {
+    _lastInteractionMemberId = memberId;
+    _lastInteractionAt = session_activity_store.readLastInteractionAt(memberId);
+  }
+
+  void _clearStoredInteraction([String? memberId]) {
+    final resolvedMemberId = memberId ?? _lastInteractionMemberId;
+    if (resolvedMemberId != null) {
+      session_activity_store.clearLastInteractionAt(resolvedMemberId);
+    }
+    if (_lastInteractionMemberId == resolvedMemberId) {
+      _lastInteractionMemberId = null;
+      _lastInteractionAt = null;
+    }
+  }
+
+  Future<bool> _enforceStoredTimeoutIfNeeded() async {
+    final lastInteractionAt = _lastInteractionAt;
+    if (lastInteractionAt == null) {
+      return false;
+    }
+
+    final now = DateTime.now().toUtc();
+    if (now.difference(lastInteractionAt) < _sessionInactivityTimeout) {
+      _restartSessionTimeout();
+      return false;
+    }
+
+    await _handleSessionTimeout();
+    return true;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_handleLifecycleResume());
+    }
+  }
+
+  Future<void> _handleLifecycleResume() async {
+    final memberId = _sessionMemberId;
+    if (memberId == null || _isTimingOutSession) {
+      return;
+    }
+
+    _loadStoredInteraction(memberId);
+    if (await _enforceStoredTimeoutIfNeeded()) {
+      return;
+    }
+
+    _restartSessionTimeout();
   }
 
   void _cancelSessionTimeout() {
@@ -528,6 +608,7 @@ class _HomePageState extends State<HomePage> {
 
     final wasPending = _isPendingApproval;
     Member? sessionMember;
+    var shouldRestartSessionTimeout = false;
 
     try {
       sessionMember = await _repository.getRemoteSessionMember();
@@ -548,9 +629,18 @@ class _HomePageState extends State<HomePage> {
           _activityLogError = '';
           _isLoadingMemberActivity = false;
         });
+        _clearStoredInteraction();
         _pageAccessLoggedMemberId = null;
         _cancelSessionTimeout();
         _syncPendingTimer();
+        return;
+      }
+
+      _sessionMemberId = sessionMember.id;
+      _loadStoredInteraction(sessionMember.id);
+
+      if (await _enforceStoredTimeoutIfNeeded()) {
+        sessionMember = null;
         return;
       }
 
@@ -567,9 +657,9 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      setState(() {
-        _appData = nextData;
-        _sessionMemberId = sessionMember!.id;
+        setState(() {
+          _appData = nextData;
+          _sessionMemberId = sessionMember!.id;
         _pendingMembers = nextPendingMembers;
         final validSelection = _selectedSuggestionId != null &&
             nextData.suggestions.any(
@@ -580,7 +670,9 @@ class _HomePageState extends State<HomePage> {
             : (nextData.suggestions.isNotEmpty
                 ? nextData.suggestions.first.id
                 : null);
-      });
+        });
+        _rememberLastInteraction();
+        shouldRestartSessionTimeout = true;
 
       if (wasPending && !_isPendingApproval) {
         _showNotice('Onayin geldi. Artik uygulamayi kullanabilirsin.');
@@ -598,7 +690,7 @@ class _HomePageState extends State<HomePage> {
           _isBooting = false;
         });
         _syncPendingTimer();
-        if (sessionMember == null) {
+        if (sessionMember == null || !shouldRestartSessionTimeout) {
           _cancelSessionTimeout();
         } else {
           _restartSessionTimeout();
@@ -687,6 +779,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    final timedOutMemberId = _sessionMemberId;
     _isTimingOutSession = true;
 
     try {
@@ -700,12 +793,26 @@ class _HomePageState extends State<HomePage> {
       }
 
       await _repository.signOutRemote(logAction: false);
+      _clearStoredInteraction(timedOutMemberId);
+      _pageAccessLoggedMemberId = null;
+      _cancelSessionTimeout();
 
       if (!mounted) {
         return;
       }
 
       setState(() {
+        _sessionMemberId = null;
+        _appData = const AppData.empty();
+        _pendingMembers = const [];
+        _memberActivityLogs = const [];
+        _selectedSuggestionId = null;
+        _editingSuggestionId = null;
+        _openSuggestionModalId = null;
+        _openSuggestionAssetPreviewId = null;
+        _openMemberVisitsMemberId = null;
+        _activityLogError = '';
+        _isLoadingMemberActivity = false;
         _loginError =
             'Uzun sure islem yapilmadigi icin tekrar giris yapman gerekiyor.';
       });
@@ -860,6 +967,11 @@ class _HomePageState extends State<HomePage> {
 
     try {
       await _repository.signInWithUsernamePassword(username, password);
+      final sessionMember = await _repository.getRemoteSessionMember();
+      if (sessionMember != null) {
+        _sessionMemberId = sessionMember.id;
+        _rememberLastInteraction();
+      }
       _loginPasswordController.clear();
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
@@ -908,6 +1020,11 @@ class _HomePageState extends State<HomePage> {
         username: username,
         password: password,
       );
+      final sessionMember = await _repository.getRemoteSessionMember();
+      if (sessionMember != null) {
+        _sessionMemberId = sessionMember.id;
+        _rememberLastInteraction();
+      }
       _registerPasswordController.clear();
       _registerUsernameController.clear();
       _showNotice('Kayit alindi.');
@@ -936,7 +1053,10 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
+      final currentMemberId = _sessionMemberId;
       await _repository.signOutRemote();
+      _clearStoredInteraction(currentMemberId);
+      _pageAccessLoggedMemberId = null;
       _loginPasswordController.clear();
       _registerPasswordController.clear();
       await _hydrateRemoteState(showLoading: false);
