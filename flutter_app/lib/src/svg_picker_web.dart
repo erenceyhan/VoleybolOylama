@@ -6,27 +6,39 @@ import 'package:web/web.dart';
 
 import 'svg_picker_types.dart';
 
+HTMLInputElement? _persistentSafariMobileInput;
+
 Future<List<PickedSvgFile>?> pickSvgFiles({
   bool allowMultiple = false,
 }) async {
   final completer = Completer<List<PickedSvgFile>?>();
-  final safariLikeBrowser = _isSafariLikeBrowser();
-  final input = HTMLInputElement()
-    ..type = 'file'
-    ..accept = safariLikeBrowser ? '' : '.svg'
-    ..multiple = allowMultiple
-    ..style.opacity = '0'
-    ..style.position = 'fixed'
-    ..style.left = '-1000px'
-    ..style.top = '0'
-    ..style.width = '1px'
-    ..style.height = '1px'
-    ..style.pointerEvents = 'none';
+  final safariMobileBrowser = _isMobileSafariBrowser();
+  final input = safariMobileBrowser
+      ? _ensurePersistentSafariMobileInput()
+      : HTMLInputElement()
+    ..type = 'file';
 
-  document.body?.children.add(input);
+  input
+    ..accept = safariMobileBrowser ? '' : '.svg'
+    ..multiple = allowMultiple
+    ..value = '';
+
+  if (!safariMobileBrowser) {
+    input.style
+      ..opacity = '0'
+      ..position = 'fixed'
+      ..left = '-1000px'
+      ..top = '0'
+      ..width = '1px'
+      ..height = '1px'
+      ..pointerEvents = 'none';
+    document.body?.children.add(input);
+  }
 
   void cleanup() {
-    input.remove();
+    if (!safariMobileBrowser) {
+      input.remove();
+    }
   }
 
   late EventListener focusListener;
@@ -71,7 +83,7 @@ Future<List<PickedSvgFile>?> pickSvgFiles({
   }).toJS;
   window.addEventListener('focus', focusListener);
 
-  if (safariLikeBrowser) {
+  if (safariMobileBrowser) {
     input.click();
   } else {
     try {
@@ -82,6 +94,27 @@ Future<List<PickedSvgFile>?> pickSvgFiles({
   }
 
   return completer.future;
+}
+
+HTMLInputElement _ensurePersistentSafariMobileInput() {
+  final existingInput = _persistentSafariMobileInput;
+  if (existingInput != null) {
+    return existingInput;
+  }
+
+  final input = HTMLInputElement()
+    ..type = 'file'
+    ..style.position = 'fixed'
+    ..style.left = '0'
+    ..style.top = '0'
+    ..style.width = '1px'
+    ..style.height = '1px'
+    ..style.opacity = '0.001'
+    ..style.zIndex = '-1';
+
+  document.body?.children.add(input);
+  _persistentSafariMobileInput = input;
+  return input;
 }
 
 Future<Uint8List> _readFileBytes(File file) async {
@@ -102,7 +135,7 @@ Future<Uint8List> _readFileBytes(File file) async {
   return completer.future;
 }
 
-bool _isSafariLikeBrowser() {
+bool _isMobileSafariBrowser() {
   final userAgent = window.navigator.userAgent.toLowerCase();
   final isIos = userAgent.contains('iphone') ||
       userAgent.contains('ipad') ||
@@ -110,6 +143,7 @@ bool _isSafariLikeBrowser() {
   final isSafari = userAgent.contains('safari') &&
       !userAgent.contains('crios') &&
       !userAgent.contains('fxios') &&
-      !userAgent.contains('edgios');
-  return isIos || isSafari;
+      !userAgent.contains('edgios') &&
+      !userAgent.contains('opr/');
+  return isIos && isSafari;
 }

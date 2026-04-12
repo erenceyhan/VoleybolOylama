@@ -6,6 +6,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'auth_utils.dart';
+import 'browser_context.dart';
 import 'models.dart';
 import 'repository.dart';
 import 'svg_picker.dart';
@@ -2348,6 +2349,7 @@ class _HomePageState extends State<HomePage> {
                             value: suggestionVotes[index].value,
                             dateLabel:
                                 formatDate(suggestionVotes[index].updatedAt),
+                            showDate: !isLikelyMobileBrowser,
                           ),
                           if (index != suggestionVotes.length - 1)
                             const SizedBox(height: 10),
@@ -3430,11 +3432,13 @@ class _VoteRow extends StatelessWidget {
     required this.memberLabel,
     required this.value,
     required this.dateLabel,
+    required this.showDate,
   });
 
   final String memberLabel;
   final int value;
   final String dateLabel;
+  final bool showDate;
 
   @override
   Widget build(BuildContext context) {
@@ -3468,13 +3472,15 @@ class _VoteRow extends StatelessWidget {
                   fontWeight: FontWeight.w800,
                 ),
           ),
-          const SizedBox(width: 12),
-          Text(
-            dateLabel,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: _mutedColor,
-                ),
-          ),
+          if (showDate) ...[
+            const SizedBox(width: 12),
+            Text(
+              dateLabel,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: _mutedColor,
+                  ),
+            ),
+          ],
         ],
       ),
     );
