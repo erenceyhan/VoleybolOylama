@@ -24,7 +24,7 @@ const _dangerColor = Color(0xFFAF3C30);
 const _borderColor = Color(0xFFE2DACE);
 const _shadowColor = Color(0x1E1C2D28);
 const _heroGlowColor = Color(0xFF8FC1A9);
-const _sessionInactivityTimeout = Duration(minutes: 30);
+const _sessionInactivityTimeout = Duration(minutes: 2);
 
 enum AuthView { login, register }
 
@@ -678,6 +678,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _showNotice('Onayin geldi. Artik uygulamayi kullanabilirsin.');
       }
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       if (!mounted) {
         return;
       }
@@ -756,7 +759,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _memberActivityLogs = entries;
         _activityLogError = '';
       });
-    } catch (_) {
+    } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       if (!mounted || _openMemberVisitsMemberId != memberId) {
         return;
       }
@@ -822,6 +828,46 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } finally {
       _isTimingOutSession = false;
     }
+  }
+
+  Future<bool> _handlePossibleSessionTimeout(Object error) async {
+    if (!isSessionTimeoutError(error)) {
+      return false;
+    }
+
+    final expiredMemberId = _sessionMemberId;
+
+    try {
+      await _repository.signOutRemote(logAction: false);
+    } catch (_) {
+      // Oturum zaten gecersiz olsa da arayuz login ekranina donsun.
+    }
+
+    _clearStoredInteraction(expiredMemberId);
+    _pageAccessLoggedMemberId = null;
+    _cancelSessionTimeout();
+
+    if (!mounted) {
+      return true;
+    }
+
+    setState(() {
+      _sessionMemberId = null;
+      _appData = const AppData.empty();
+      _pendingMembers = const [];
+      _memberActivityLogs = const [];
+      _selectedSuggestionId = null;
+      _editingSuggestionId = null;
+      _openSuggestionModalId = null;
+      _openSuggestionAssetPreviewId = null;
+      _openMemberVisitsMemberId = null;
+      _activityLogError = '';
+      _isLoadingMemberActivity = false;
+      _loginError =
+          'Uzun sure islem yapilmadigi icin tekrar giris yapman gerekiyor.';
+    });
+    _showError(_loginError);
+    return true;
   }
 
   void _openSuggestionModal(String suggestionId) {
@@ -975,6 +1021,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _loginPasswordController.clear();
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       if (!mounted) {
         return;
       }
@@ -1030,6 +1079,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _showNotice('Kayit alindi.');
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       if (!mounted) {
         return;
       }
@@ -1061,6 +1113,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _registerPasswordController.clear();
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       if (!mounted) {
         return;
       }
@@ -1175,6 +1230,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       _showError(getAuthErrorMessage(error));
     } finally {
       if (mounted) {
@@ -1205,6 +1263,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       _showError(getAuthErrorMessage(error));
     } finally {
       if (mounted) {
@@ -1249,6 +1310,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       controller.clear();
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       _showError(getAuthErrorMessage(error));
     } finally {
       if (mounted) {
@@ -1293,6 +1357,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       _showError(getAuthErrorMessage(error));
     } finally {
       if (mounted) {
@@ -1341,6 +1408,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _editingSuggestionNoteController.clear();
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       _showError(getAuthErrorMessage(error));
     } finally {
       if (mounted) {
@@ -1430,6 +1500,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       _showError(getAuthErrorMessage(error));
     } finally {
       if (mounted) {
@@ -1488,6 +1561,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _showNotice('SVG dosyasi silindi.');
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       _showError(getAuthErrorMessage(error));
     } finally {
       if (mounted) {
@@ -1533,6 +1609,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       _showError(getAuthErrorMessage(error));
     } finally {
       if (mounted) {
@@ -1568,6 +1647,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _showNotice('Uye onaylandi.');
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       if (!mounted) {
         return;
       }
@@ -1616,6 +1698,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _showNotice('Kayit reddedildi.');
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       if (!mounted) {
         return;
       }
@@ -1671,6 +1756,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _showNotice('Uye silindi.');
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return;
+      }
       if (!mounted) {
         return;
       }

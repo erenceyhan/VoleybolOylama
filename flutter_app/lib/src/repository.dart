@@ -12,12 +12,30 @@ class AppRepository {
 
   Stream<AuthState> get authStateChanges => client.auth.onAuthStateChange;
 
+  Future<void> beginCurrentSession() {
+    return client.rpc('begin_current_session');
+  }
+
+  Future<void> touchCurrentSession() {
+    return client.rpc('touch_current_session');
+  }
+
+  Future<void> endCurrentSession() async {
+    try {
+      await client.rpc('end_current_session');
+    } catch (_) {
+      // Oturum kapanirken sunucu tarafli temizleme sessizce gecsin.
+    }
+  }
+
   Future<Member?> getRemoteSessionMember() async {
     final session = client.auth.currentSession;
 
     if (session?.user == null) {
       return null;
     }
+
+    await touchCurrentSession();
 
     final data = await client
         .from('profiles')
@@ -33,6 +51,7 @@ class AppRepository {
   }
 
   Future<AppData> fetchRemoteAppData() async {
+    await touchCurrentSession();
     final results = await Future.wait<dynamic>([
       client
           .from('profiles')
@@ -85,6 +104,7 @@ class AppRepository {
       email: getVirtualEmailForUsername(username),
       password: password,
     );
+    await beginCurrentSession();
     await logMemberActivity(
       actionType: 'login_success',
       targetType: 'auth',
@@ -121,6 +141,7 @@ class AppRepository {
           'display_name_input': normalizedUsername,
         },
       );
+      await beginCurrentSession();
       await logMemberActivity(
         actionType: 'signup_completed',
         targetType: 'auth',
@@ -146,10 +167,12 @@ class AppRepository {
       }
     }
 
+    await endCurrentSession();
     await client.auth.signOut();
   }
 
   Future<Suggestion> addRemoteSuggestion(String title, String note) async {
+    await touchCurrentSession();
     final session = client.auth.currentSession;
 
     if (session?.user == null) {
@@ -170,6 +193,7 @@ class AppRepository {
   }
 
   Future<void> deleteRemoteSuggestion(String suggestionId) async {
+    await touchCurrentSession();
     final assetRows = await client
         .from('suggestion_assets')
         .select('storage_path')
@@ -188,9 +212,11 @@ class AppRepository {
   }
 
   Future<void> updateRemoteSuggestionNote(String suggestionId, String note) {
-    return client.from('suggestions').update({
-      'note': note.trim(),
-    }).eq('id', suggestionId);
+    return touchCurrentSession().then(
+      (_) => client.from('suggestions').update({
+            'note': note.trim(),
+          }).eq('id', suggestionId),
+    );
   }
 
   Future<void> uploadSuggestionAsset({
@@ -198,6 +224,7 @@ class AppRepository {
     required String fileName,
     required Uint8List bytes,
   }) async {
+    await touchCurrentSession();
     final session = client.auth.currentSession;
 
     if (session?.user == null) {
@@ -254,6 +281,7 @@ class AppRepository {
   }
 
   Future<void> deleteSuggestionAsset(SuggestionAsset asset) async {
+    await touchCurrentSession();
     await client.storage
         .from(suggestionAssetBucket)
         .remove([asset.storagePath]);
@@ -261,6 +289,7 @@ class AppRepository {
   }
 
   Future<void> upsertRemoteVote(String suggestionId, int value) async {
+    await touchCurrentSession();
     final session = client.auth.currentSession;
 
     if (session?.user == null) {
@@ -279,6 +308,7 @@ class AppRepository {
   }
 
   Future<void> deleteRemoteVote(String suggestionId) async {
+    await touchCurrentSession();
     final session = client.auth.currentSession;
 
     if (session?.user == null) {
@@ -293,6 +323,7 @@ class AppRepository {
   }
 
   Future<void> addRemoteComment(String suggestionId, String message) async {
+    await touchCurrentSession();
     final session = client.auth.currentSession;
 
     if (session?.user == null) {
@@ -307,10 +338,12 @@ class AppRepository {
   }
 
   Future<void> deleteRemoteComment(String commentId) {
-    return client.from('comments').delete().eq('id', commentId);
+    return touchCurrentSession()
+        .then((_) => client.from('comments').delete().eq('id', commentId));
   }
 
   Future<List<Member>> fetchPendingMembers() async {
+    await touchCurrentSession();
     final data = await client
         .from('profiles')
         .select('id, username, display_name, role, approved')
@@ -343,6 +376,7 @@ class AppRepository {
   Future<List<MemberActivityLogEntry>> fetchMemberActivityLogs(
     String memberId,
   ) async {
+    await touchCurrentSession();
     final data = await client
         .from('member_activity_logs')
         .select(
@@ -359,12 +393,14 @@ class AppRepository {
   }
 
   Future<void> updateMemberApproval(String memberId, bool approved) {
-    return client.rpc(
-      'admin_set_member_approval',
-      params: {
-        'member_id_input': memberId,
-        'approved_input': approved,
-      },
+    return touchCurrentSession().then(
+      (_) => client.rpc(
+        'admin_set_member_approval',
+        params: {
+          'member_id_input': memberId,
+          'approved_input': approved,
+        },
+      ),
     );
   }
 
@@ -373,6 +409,7 @@ class AppRepository {
   }
 
   Future<void> deleteRemoteMember(String memberId) async {
+    await touchCurrentSession();
     final assetRows = await client
         .from('suggestion_assets')
         .select('storage_path')

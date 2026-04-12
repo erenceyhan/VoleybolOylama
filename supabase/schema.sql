@@ -11,6 +11,7 @@ create table if not exists public.profiles (
   approved boolean not null default false,
   approved_at timestamptz,
   approved_by uuid references public.profiles (id) on delete set null,
+  last_activity_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -22,6 +23,9 @@ alter table public.profiles
 
 alter table public.profiles
   add column if not exists approved_by uuid references public.profiles (id) on delete set null;
+
+alter table public.profiles
+  add column if not exists last_activity_at timestamptz;
 
 create table if not exists public.suggestions (
   id uuid primary key default gen_random_uuid(),
@@ -106,6 +110,23 @@ security definer
 set search_path = public
 as $$
   select coalesce((select approved from public.profiles where id = auth.uid()), false);
+$$;
+
+create or replace function public.current_profile_session_is_active()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce(
+    (
+      select last_activity_at >= now() - interval '2 minutes'
+      from public.profiles
+      where id = auth.uid()
+    ),
+    false
+  );
 $$;
 
 create or replace function public.enforce_suggestion_limit()
@@ -243,6 +264,114 @@ begin
 end;
 $$;
 
+create or replace function public.begin_current_session()
+returns public.profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  profile_row public.profiles;
+begin
+  if auth.uid() is null then
+    raise exception 'Gecerli bir oturum bulunamadi.';
+  end if;
+
+  update public.profiles
+  set last_activity_at = now()
+  where id = auth.uid()
+  returning * into profile_row;
+
+  if not found then
+    raise exception 'Aktif uye profili bulunamadi.';
+  end if;
+
+  return profile_row;
+end;
+$$;
+
+create or replace function public.touch_current_session()
+returns public.profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  profile_row public.profiles;
+  recent_timeout_exists boolean;
+begin
+  if auth.uid() is null then
+    raise exception 'Gecerli bir oturum bulunamadi.';
+  end if;
+
+  update public.profiles
+  set last_activity_at = now()
+  where id = auth.uid()
+    and coalesce(last_activity_at >= now() - interval '2 minutes', false)
+  returning * into profile_row;
+
+  if found then
+    return profile_row;
+  end if;
+
+  select exists (
+    select 1
+    from public.member_activity_logs
+    where member_id = auth.uid()
+      and action_type = 'session_timeout'
+      and created_at >= now() - interval '5 minutes'
+  )
+  into recent_timeout_exists;
+
+  if not recent_timeout_exists then
+    insert into public.member_activity_logs (
+      member_id,
+      action_type,
+      target_type,
+      details
+    )
+    values (
+      auth.uid(),
+      'session_timeout',
+      'auth',
+      '{}'::jsonb
+    );
+  end if;
+
+  update public.profiles
+  set last_activity_at = null
+  where id = auth.uid();
+
+  raise exception 'SESSION_TIMEOUT';
+end;
+$$;
+
+create or replace function public.end_current_session()
+returns public.profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  profile_row public.profiles;
+begin
+  if auth.uid() is null then
+    raise exception 'Gecerli bir oturum bulunamadi.';
+  end if;
+
+  update public.profiles
+  set last_activity_at = null
+  where id = auth.uid()
+  returning * into profile_row;
+
+  if not found then
+    raise exception 'Aktif uye profili bulunamadi.';
+  end if;
+
+  return profile_row;
+end;
+$$;
+
 create or replace function public.complete_signup(
   display_name_input text
 )
@@ -296,6 +425,7 @@ begin
     display_name,
     role,
     approved,
+    last_activity_at,
     approved_at
   )
   values (
@@ -304,6 +434,7 @@ begin
     coalesce(nullif(trim(display_name_input), ''), normalized_username),
     next_role,
     next_approved,
+    now(),
     case when next_approved then now() else null end
   )
   returning * into profile_row;
@@ -412,9 +543,16 @@ on public.profiles
 for select
 to authenticated
 using (
-  (approved = true and public.current_profile_is_approved())
-  or id = auth.uid()
-  or public.current_profile_role() = 'admin'
+  (
+    approved = true
+    and public.current_profile_is_approved()
+    and public.current_profile_session_is_active()
+  )
+  or (id = auth.uid() and public.current_profile_session_is_active())
+  or (
+    public.current_profile_role() = 'admin'
+    and public.current_profile_session_is_active()
+  )
 );
 
 drop policy if exists "users can update own profile" on public.profiles;
@@ -422,8 +560,8 @@ create policy "users can update own profile"
 on public.profiles
 for update
 to authenticated
-using (id = auth.uid())
-with check (id = auth.uid());
+using (id = auth.uid() and public.current_profile_session_is_active())
+with check (id = auth.uid() and public.current_profile_session_is_active());
 
 drop policy if exists "approved users can read suggestions" on public.suggestions;
 create policy "approved users can read suggestions"
@@ -431,8 +569,14 @@ on public.suggestions
 for select
 to authenticated
 using (
-  public.current_profile_is_approved()
-  or public.current_profile_role() = 'admin'
+  (
+    public.current_profile_is_approved()
+    and public.current_profile_session_is_active()
+  )
+  or (
+    public.current_profile_role() = 'admin'
+    and public.current_profile_session_is_active()
+  )
 );
 
 drop policy if exists "approved users can insert suggestions" on public.suggestions;
@@ -443,6 +587,7 @@ to authenticated
 with check (
   member_id = auth.uid()
   and public.current_profile_is_approved()
+  and public.current_profile_session_is_active()
 );
 
 drop policy if exists "owners or admins can update suggestions" on public.suggestions;
@@ -451,8 +596,8 @@ create policy "owners can update suggestions"
 on public.suggestions
 for update
 to authenticated
-using (member_id = auth.uid())
-with check (member_id = auth.uid());
+using (member_id = auth.uid() and public.current_profile_session_is_active())
+with check (member_id = auth.uid() and public.current_profile_session_is_active());
 
 drop policy if exists "owners or admins can delete suggestions" on public.suggestions;
 drop policy if exists "owners can delete suggestions" on public.suggestions;
@@ -460,7 +605,13 @@ create policy "owners or admins can delete suggestions"
 on public.suggestions
 for delete
 to authenticated
-using (member_id = auth.uid() or public.current_profile_role() = 'admin');
+using (
+  (
+    member_id = auth.uid()
+    or public.current_profile_role() = 'admin'
+  )
+  and public.current_profile_session_is_active()
+);
 
 drop policy if exists "approved users can read suggestion assets" on public.suggestion_assets;
 create policy "approved users can read suggestion assets"
@@ -468,8 +619,14 @@ on public.suggestion_assets
 for select
 to authenticated
 using (
-  public.current_profile_is_approved()
-  or public.current_profile_role() = 'admin'
+  (
+    public.current_profile_is_approved()
+    and public.current_profile_session_is_active()
+  )
+  or (
+    public.current_profile_role() = 'admin'
+    and public.current_profile_session_is_active()
+  )
 );
 
 drop policy if exists "owners can insert suggestion assets" on public.suggestion_assets;
@@ -483,6 +640,7 @@ with check (
     public.current_profile_is_approved()
     or public.current_profile_role() = 'admin'
   )
+  and public.current_profile_session_is_active()
 );
 
 drop policy if exists "owners or admins can delete suggestion assets" on public.suggestion_assets;
@@ -490,21 +648,30 @@ create policy "owners or admins can delete suggestion assets"
 on public.suggestion_assets
 for delete
 to authenticated
-using (member_id = auth.uid() or public.current_profile_role() = 'admin');
+using (
+  (
+    member_id = auth.uid()
+    or public.current_profile_role() = 'admin'
+  )
+  and public.current_profile_session_is_active()
+);
 
 drop policy if exists "admins can read member activity logs" on public.member_activity_logs;
 create policy "admins can read member activity logs"
 on public.member_activity_logs
 for select
 to authenticated
-using (public.current_profile_role() = 'admin');
+using (
+  public.current_profile_role() = 'admin'
+  and public.current_profile_session_is_active()
+);
 
 drop policy if exists "users can insert own member activity logs" on public.member_activity_logs;
 create policy "users can insert own member activity logs"
 on public.member_activity_logs
 for insert
 to authenticated
-with check (member_id = auth.uid());
+with check (member_id = auth.uid() and public.current_profile_session_is_active());
 
 drop policy if exists "approved users can read votes" on public.votes;
 create policy "approved users can read votes"
@@ -512,8 +679,14 @@ on public.votes
 for select
 to authenticated
 using (
-  public.current_profile_is_approved()
-  or public.current_profile_role() = 'admin'
+  (
+    public.current_profile_is_approved()
+    and public.current_profile_session_is_active()
+  )
+  or (
+    public.current_profile_role() = 'admin'
+    and public.current_profile_session_is_active()
+  )
 );
 
 drop policy if exists "users can insert own votes" on public.votes;
@@ -524,6 +697,7 @@ to authenticated
 with check (
   member_id = auth.uid()
   and public.current_profile_is_approved()
+  and public.current_profile_session_is_active()
 );
 
 drop policy if exists "users can update own votes" on public.votes;
@@ -531,15 +705,15 @@ create policy "users can update own votes"
 on public.votes
 for update
 to authenticated
-using (member_id = auth.uid())
-with check (member_id = auth.uid());
+using (member_id = auth.uid() and public.current_profile_session_is_active())
+with check (member_id = auth.uid() and public.current_profile_session_is_active());
 
 drop policy if exists "users can delete own votes" on public.votes;
 create policy "users can delete own votes"
 on public.votes
 for delete
 to authenticated
-using (member_id = auth.uid());
+using (member_id = auth.uid() and public.current_profile_session_is_active());
 
 drop policy if exists "approved users can read comments" on public.comments;
 create policy "approved users can read comments"
@@ -547,8 +721,14 @@ on public.comments
 for select
 to authenticated
 using (
-  public.current_profile_is_approved()
-  or public.current_profile_role() = 'admin'
+  (
+    public.current_profile_is_approved()
+    and public.current_profile_session_is_active()
+  )
+  or (
+    public.current_profile_role() = 'admin'
+    and public.current_profile_session_is_active()
+  )
 );
 
 drop policy if exists "users can insert own comments" on public.comments;
@@ -559,6 +739,7 @@ to authenticated
 with check (
   member_id = auth.uid()
   and public.current_profile_is_approved()
+  and public.current_profile_session_is_active()
 );
 
 drop policy if exists "owners or admins can delete comments" on public.comments;
@@ -566,7 +747,13 @@ create policy "owners or admins can delete comments"
 on public.comments
 for delete
 to authenticated
-using (member_id = auth.uid() or public.current_profile_role() = 'admin');
+using (
+  (
+    member_id = auth.uid()
+    or public.current_profile_role() = 'admin'
+  )
+  and public.current_profile_session_is_active()
+);
 
 drop policy if exists "approved users can view suggestion svg objects" on storage.objects;
 create policy "approved users can view suggestion svg objects"
@@ -579,6 +766,7 @@ using (
     public.current_profile_is_approved()
     or public.current_profile_role() = 'admin'
   )
+  and public.current_profile_session_is_active()
 );
 
 drop policy if exists "owners can upload suggestion svg objects" on storage.objects;
@@ -592,6 +780,7 @@ with check (
     public.current_profile_is_approved()
     or public.current_profile_role() = 'admin'
   )
+  and public.current_profile_session_is_active()
   and (storage.foldername(name))[1] = auth.uid()::text
 );
 
@@ -606,6 +795,7 @@ using (
     (storage.foldername(name))[1] = auth.uid()::text
     or public.current_profile_role() = 'admin'
   )
+  and public.current_profile_session_is_active()
 );
 
 grant usage on schema public to authenticated;
@@ -617,7 +807,11 @@ grant select, insert, update, delete on public.votes to authenticated;
 grant select, insert, delete on public.comments to authenticated;
 grant execute on function public.current_profile_role() to authenticated;
 grant execute on function public.current_profile_is_approved() to authenticated;
+grant execute on function public.current_profile_session_is_active() to authenticated;
 grant execute on function public.enforce_suggestion_asset_rules() to authenticated;
+grant execute on function public.begin_current_session() to authenticated;
+grant execute on function public.touch_current_session() to authenticated;
+grant execute on function public.end_current_session() to authenticated;
 grant execute on function public.log_member_activity(text, text, text, jsonb) to authenticated;
 grant execute on function public.complete_signup(text) to authenticated;
 grant execute on function public.admin_set_member_approval(uuid, boolean) to authenticated;

@@ -51,5 +51,23 @@ String getAuthErrorMessage(Object error) {
     return 'Bu kullanici adi zaten kayitli.';
   }
 
+  if (isSessionTimeoutError(error)) {
+    return 'Uzun sure islem yapilmadigi icin tekrar giris yapman gerekiyor.';
+  }
+
   return message;
+}
+
+bool isSessionTimeoutError(Object error) {
+  final message = switch (error) {
+    AuthException authException => authException.message,
+    PostgrestException postgrestException => postgrestException.message,
+    StorageException storageException => storageException.message,
+    _ => error.toString().replaceFirst('Exception: ', ''),
+  };
+
+  final lowered = message.toLowerCase();
+  return lowered.contains('session_timeout') ||
+      lowered.contains('uzun sure islem yapilmadigi') ||
+      lowered.contains('tekrar giris yapman gerekiyor');
 }
