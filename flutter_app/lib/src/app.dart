@@ -295,6 +295,7 @@ class _HomePageState extends State<HomePage> {
   late final AppRepository _repository;
   StreamSubscription<AuthState>? _authSubscription;
   Timer? _pendingRefreshTimer;
+  Timer? _visitHeartbeatTimer;
 
   final _loginUsernameController = TextEditingController();
   final _loginPasswordController = TextEditingController();
@@ -320,7 +321,8 @@ class _HomePageState extends State<HomePage> {
   String _visitError = '';
   bool _isBooting = true;
   bool _isSubmitting = false;
-  String? _lastRecordedVisitMemberId;
+  DateTime? _lastVisitPingAt;
+  String? _lastVisitPingMemberId;
 
   @override
   void initState() {
@@ -336,6 +338,7 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     _authSubscription?.cancel();
     _pendingRefreshTimer?.cancel();
+    _visitHeartbeatTimer?.cancel();
     _loginUsernameController.dispose();
     _loginPasswordController.dispose();
     _registerUsernameController.dispose();
@@ -473,9 +476,10 @@ class _HomePageState extends State<HomePage> {
     }
 
     final wasPending = _isPendingApproval;
+    Member? sessionMember;
 
     try {
-      final sessionMember = await _repository.getRemoteSessionMember();
+      sessionMember = await _repository.getRemoteSessionMember();
 
       if (!mounted) {
         return;
@@ -492,7 +496,9 @@ class _HomePageState extends State<HomePage> {
           _openMemberVisitsMemberId = null;
           _visitError = '';
         });
-        _lastRecordedVisitMemberId = null;
+        _lastVisitPingAt = null;
+        _lastVisitPingMemberId = null;
+        _syncVisitHeartbeat(null);
         _syncPendingTimer();
         return;
       }
@@ -516,7 +522,7 @@ class _HomePageState extends State<HomePage> {
 
       setState(() {
         _appData = nextData;
-        _sessionMemberId = sessionMember.id;
+        _sessionMemberId = sessionMember!.id;
         _pendingMembers = nextPendingMembers;
         _memberVisits = nextVisitLoad.entries;
         _visitError = nextVisitLoad.errorMessage;
@@ -547,16 +553,23 @@ class _HomePageState extends State<HomePage> {
           _isBooting = false;
         });
         _syncPendingTimer();
+        _syncVisitHeartbeat(sessionMember?.id);
       }
     }
   }
 
   Future<void> _recordVisitIfNeeded(Member sessionMember) async {
-    if (_lastRecordedVisitMemberId == sessionMember.id) {
+    final now = DateTime.now();
+    final sameMember = _lastVisitPingMemberId == sessionMember.id;
+    final recentEnough = _lastVisitPingAt != null &&
+        now.difference(_lastVisitPingAt!) < const Duration(seconds: 75);
+
+    if (sameMember && recentEnough) {
       return;
     }
 
-    _lastRecordedVisitMemberId = sessionMember.id;
+    _lastVisitPingMemberId = sessionMember.id;
+    _lastVisitPingAt = now;
 
     try {
       await _repository.recordCurrentMemberVisit();
@@ -604,6 +617,26 @@ class _HomePageState extends State<HomePage> {
     _pendingRefreshTimer = Timer.periodic(
       const Duration(seconds: 5),
       (_) => unawaited(_hydrateRemoteState(showLoading: false)),
+    );
+  }
+
+  void _syncVisitHeartbeat(String? memberId) {
+    _visitHeartbeatTimer?.cancel();
+
+    if (memberId == null) {
+      return;
+    }
+
+    _visitHeartbeatTimer = Timer.periodic(
+      const Duration(seconds: 90),
+      (_) {
+        final currentMember = _currentMember;
+        if (currentMember == null) {
+          return;
+        }
+
+        unawaited(_recordVisitIfNeeded(currentMember));
+      },
     );
   }
 
