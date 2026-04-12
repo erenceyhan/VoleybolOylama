@@ -57,6 +57,15 @@ create table if not exists public.suggestion_assets (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.member_visits (
+  id uuid primary key default gen_random_uuid(),
+  member_id uuid not null references public.profiles (id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists member_visits_member_id_created_at_idx
+  on public.member_visits (member_id, created_at desc);
+
 insert into storage.buckets (
   id,
   name,
@@ -197,6 +206,27 @@ delete from public.votes
 using public.suggestions
 where public.votes.suggestion_id = public.suggestions.id
   and public.votes.member_id = public.suggestions.member_id;
+
+create or replace function public.record_member_visit()
+returns public.member_visits
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  visit_row public.member_visits;
+begin
+  if auth.uid() is null then
+    raise exception 'Gecerli bir oturum bulunamadi.';
+  end if;
+
+  insert into public.member_visits (member_id)
+  values (auth.uid())
+  returning * into visit_row;
+
+  return visit_row;
+end;
+$$;
 
 create or replace function public.complete_signup(
   display_name_input text
@@ -357,6 +387,7 @@ $$;
 alter table public.profiles enable row level security;
 alter table public.suggestions enable row level security;
 alter table public.suggestion_assets enable row level security;
+alter table public.member_visits enable row level security;
 alter table public.votes enable row level security;
 alter table public.comments enable row level security;
 
@@ -445,6 +476,20 @@ on public.suggestion_assets
 for delete
 to authenticated
 using (member_id = auth.uid() or public.current_profile_role() = 'admin');
+
+drop policy if exists "admins can read member visits" on public.member_visits;
+create policy "admins can read member visits"
+on public.member_visits
+for select
+to authenticated
+using (public.current_profile_role() = 'admin');
+
+drop policy if exists "users can insert own member visits" on public.member_visits;
+create policy "users can insert own member visits"
+on public.member_visits
+for insert
+to authenticated
+with check (member_id = auth.uid());
 
 drop policy if exists "approved users can read votes" on public.votes;
 create policy "approved users can read votes"
@@ -552,11 +597,13 @@ grant usage on schema public to authenticated;
 grant select, update on public.profiles to authenticated;
 grant select, insert, update, delete on public.suggestions to authenticated;
 grant select, insert, delete on public.suggestion_assets to authenticated;
+grant select, insert on public.member_visits to authenticated;
 grant select, insert, update, delete on public.votes to authenticated;
 grant select, insert, delete on public.comments to authenticated;
 grant execute on function public.current_profile_role() to authenticated;
 grant execute on function public.current_profile_is_approved() to authenticated;
 grant execute on function public.enforce_suggestion_asset_rules() to authenticated;
+grant execute on function public.record_member_visit() to authenticated;
 grant execute on function public.complete_signup(text) to authenticated;
 grant execute on function public.admin_set_member_approval(uuid, boolean) to authenticated;
 grant execute on function public.admin_reject_member(uuid) to authenticated;

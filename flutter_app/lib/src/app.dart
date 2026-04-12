@@ -310,13 +310,17 @@ class _HomePageState extends State<HomePage> {
   String? _selectedSuggestionId;
   String? _editingSuggestionId;
   String? _openSuggestionModalId;
+  String? _openMemberVisitsMemberId;
   List<Member> _pendingMembers = const [];
+  List<MemberVisitEntry> _memberVisits = const [];
   AuthView _authView = AuthView.login;
   String _loginError = '';
   String _suggestionError = '';
   String _adminError = '';
+  String _visitError = '';
   bool _isBooting = true;
   bool _isSubmitting = false;
+  String? _lastRecordedVisitMemberId;
 
   @override
   void initState() {
@@ -482,17 +486,29 @@ class _HomePageState extends State<HomePage> {
           _sessionMemberId = null;
           _appData = const AppData.empty();
           _pendingMembers = const [];
+          _memberVisits = const [];
           _selectedSuggestionId = null;
           _editingSuggestionId = null;
+          _openMemberVisitsMemberId = null;
+          _visitError = '';
         });
+        _lastRecordedVisitMemberId = null;
         _syncPendingTimer();
         return;
       }
 
+      await _recordVisitIfNeeded(sessionMember);
+
       final nextData = await _repository.fetchRemoteAppData();
-      final nextPendingMembers = sessionMember.isAdmin
-          ? await _repository.fetchPendingMembers()
-          : const <Member>[];
+      final nextPendingMembersFuture = sessionMember.isAdmin
+          ? _repository.fetchPendingMembers()
+          : Future.value(const <Member>[]);
+      final nextVisitLoadFuture = sessionMember.isAdmin
+          ? _fetchAdminVisitLoadResult()
+          : Future.value(const _AdminVisitLoadResult.empty());
+
+      final nextPendingMembers = await nextPendingMembersFuture;
+      final nextVisitLoad = await nextVisitLoadFuture;
 
       if (!mounted) {
         return;
@@ -502,6 +518,8 @@ class _HomePageState extends State<HomePage> {
         _appData = nextData;
         _sessionMemberId = sessionMember.id;
         _pendingMembers = nextPendingMembers;
+        _memberVisits = nextVisitLoad.entries;
+        _visitError = nextVisitLoad.errorMessage;
         final validSelection = _selectedSuggestionId != null &&
             nextData.suggestions.any(
               (suggestion) => suggestion.id == _selectedSuggestionId,
@@ -533,6 +551,32 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _recordVisitIfNeeded(Member sessionMember) async {
+    if (_lastRecordedVisitMemberId == sessionMember.id) {
+      return;
+    }
+
+    _lastRecordedVisitMemberId = sessionMember.id;
+
+    try {
+      await _repository.recordCurrentMemberVisit();
+    } catch (_) {
+      // Ziyaret takibi acilmamis olsa bile uygulama akisi bozulmasin.
+    }
+  }
+
+  Future<_AdminVisitLoadResult> _fetchAdminVisitLoadResult() async {
+    try {
+      final entries = await _repository.fetchMemberVisits();
+      return _AdminVisitLoadResult(entries: entries, errorMessage: '');
+    } catch (_) {
+      return const _AdminVisitLoadResult(
+        entries: [],
+        errorMessage: 'Giris takibi simdilik yuklenemedi.',
+      );
+    }
+  }
+
   void _syncPendingTimer() {
     _pendingRefreshTimer?.cancel();
 
@@ -555,6 +599,7 @@ class _HomePageState extends State<HomePage> {
       _selectedSuggestionId = suggestionId;
       _editingSuggestionId = null;
       _openSuggestionModalId = suggestionId;
+      _openMemberVisitsMemberId = null;
     });
   }
 
@@ -566,6 +611,27 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _editingSuggestionId = null;
       _openSuggestionModalId = null;
+    });
+  }
+
+  void _openMemberVisitsModal(String memberId) {
+    if (!mounted || !_isAdmin) {
+      return;
+    }
+
+    setState(() {
+      _openMemberVisitsMemberId = memberId;
+      _openSuggestionModalId = null;
+    });
+  }
+
+  void _closeMemberVisitsModal() {
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _openMemberVisitsMemberId = null;
     });
   }
 
@@ -1082,8 +1148,51 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      await _repository.rejectRemoteMember(memberId);
+      await _repository.deleteRemoteMember(memberId);
       _showNotice('Kayit reddedildi.');
+      await _hydrateRemoteState(showLoading: false);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _adminError = getAuthErrorMessage(error);
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _handleDeleteMember(Member member) async {
+    if (!_canAdminDeleteMember(member)) {
+      return;
+    }
+
+    final shouldDelete = await _confirmAction(
+      '@${member.label} kullanicisini tamamen silmek istiyor musun? Bu islem oylarini, yorumlarini, onerilerini ve yukledigi SVG dosyalarini kaldirir.',
+    );
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    setState(() {
+      _adminError = '';
+      _isSubmitting = true;
+    });
+
+    try {
+      await _repository.deleteRemoteMember(member.id);
+      if (mounted) {
+        setState(() {
+          _openMemberVisitsMemberId = null;
+        });
+      }
+      _showNotice('Uye silindi.');
       await _hydrateRemoteState(showLoading: false);
     } catch (error) {
       if (!mounted) {
@@ -1271,8 +1380,32 @@ class _HomePageState extends State<HomePage> {
     return currentMember.id == comment.memberId || _isAdmin;
   }
 
+  bool _canAdminDeleteMember(Member member) {
+    final currentMember = _currentMember;
+    if (currentMember == null || !_isAdmin) {
+      return false;
+    }
+
+    if (member.id == currentMember.id) {
+      return false;
+    }
+
+    return !member.isAdmin;
+  }
+
   String _memberLabel(String memberId) {
     return _membersById[memberId]?.label ?? 'Bilinmeyen uye';
+  }
+
+  Member? _memberById(String memberId) {
+    return _membersById[memberId];
+  }
+
+  List<MemberVisitEntry> _memberVisitsFor(String memberId) {
+    final visits =
+        _memberVisits.where((visit) => visit.memberId == memberId).toList();
+    visits.sort((left, right) => right.createdAt.compareTo(left.createdAt));
+    return visits;
   }
 
   void _showNotice(String message) {
@@ -1330,6 +1463,9 @@ class _HomePageState extends State<HomePage> {
     final modalSuggestion = _openSuggestionModalId == null
         ? null
         : _findSuggestionById(_openSuggestionModalId!);
+    final memberVisitsModalMember = _openMemberVisitsMemberId == null
+        ? null
+        : _memberById(_openMemberVisitsMemberId!);
 
     return Scaffold(
       body: Stack(
@@ -1409,7 +1545,6 @@ class _HomePageState extends State<HomePage> {
           if (modalSuggestion != null)
             Positioned.fill(
               child: _SuggestionOverlay(
-                suggestion: modalSuggestion,
                 onClose: _closeSuggestionModal,
                 child: _buildSuggestionPopupFrame(
                   context,
@@ -1421,6 +1556,17 @@ class _HomePageState extends State<HomePage> {
                     }
                   },
                   onClose: _closeSuggestionModal,
+                ),
+              ),
+            ),
+          if (memberVisitsModalMember != null)
+            Positioned.fill(
+              child: _SuggestionOverlay(
+                onClose: _closeMemberVisitsModal,
+                child: _buildMemberVisitsPopupFrame(
+                  context,
+                  memberVisitsModalMember,
+                  compact: MediaQuery.of(context).size.width < 860,
                 ),
               ),
             ),
@@ -1532,6 +1678,7 @@ class _HomePageState extends State<HomePage> {
                                       : _memberLabel(
                                           leadingSuggestion.memberId),
                                   pendingOnlyMode: _pendingOnlyMode,
+                                  requiresRegistration: _currentMember == null,
                                 ),
                               ),
                             ),
@@ -1558,6 +1705,7 @@ class _HomePageState extends State<HomePage> {
                                 ? null
                                 : _memberLabel(leadingSuggestion.memberId),
                             pendingOnlyMode: _pendingOnlyMode,
+                            requiresRegistration: _currentMember == null,
                           ),
                         ],
                       ),
@@ -1957,54 +2105,167 @@ class _HomePageState extends State<HomePage> {
   Widget _buildMembersPanel(BuildContext context) {
     return _Panel(
       title: 'Uyeler',
-      child: _appData.members.isEmpty
-          ? Text(
-              'Uyeleri gormek icin once giris yap.',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (_isAdmin && _visitError.isNotEmpty) ...[
+            _InlineMessage(message: _visitError, color: _dangerColor),
+            const SizedBox(height: 12),
+          ],
+          if (_appData.members.isEmpty)
+            Text(
+              'Kayit olmadan bilgileri goremezsiniz.',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                     color: _mutedColor,
                   ),
             )
-          : Wrap(
+          else
+            Wrap(
               spacing: 10,
               runSpacing: 10,
               children: _appData.members
                   .map(
-                    (member) => Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 12,
-                      ),
-                      decoration: BoxDecoration(
-                        color: _surfaceAlt,
-                        borderRadius: BorderRadius.circular(18),
-                        border: Border.all(color: _borderColor),
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '@${member.label}',
-                            style:
-                                Theme.of(context).textTheme.bodyLarge?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                      color: _primaryColor,
-                                    ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            member.approved ? 'onayli' : 'onay bekliyor',
-                            style:
-                                Theme.of(context).textTheme.bodySmall?.copyWith(
-                                      color: _mutedColor,
-                                    ),
-                          ),
-                        ],
-                      ),
+                    (member) => _MemberBadge(
+                      member: member,
+                      isClickable: _isAdmin,
+                      onTap: _isAdmin
+                          ? () => _openMemberVisitsModal(member.id)
+                          : null,
                     ),
                   )
                   .toList(),
             ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMemberVisitsPopupFrame(
+    BuildContext context,
+    Member member, {
+    required bool compact,
+  }) {
+    final memberVisits = _memberVisitsFor(member.id);
+    final canDeleteMember = _canAdminDeleteMember(member);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: _surfaceColor,
+        borderRadius: BorderRadius.circular(compact ? 28 : 34),
+        border: Border.all(color: _borderColor),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x26111E1A),
+            blurRadius: 34,
+            offset: Offset(0, 22),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              compact ? 20 : 26,
+              compact ? 18 : 22,
+              compact ? 16 : 20,
+              0,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '@${member.label}',
+                        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                              color: _primaryColor,
+                              fontWeight: FontWeight.w800,
+                            ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Giris gecmisi',
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: _mutedColor,
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (canDeleteMember)
+                  TextButton.icon(
+                    onPressed: _isSubmitting
+                        ? null
+                        : () async {
+                            await _handleDeleteMember(member);
+                          },
+                    style: TextButton.styleFrom(
+                      foregroundColor: _dangerColor,
+                    ),
+                    icon: const Icon(Icons.delete_outline),
+                    label: const Text('Uyeyi sil'),
+                  ),
+                IconButton(
+                  onPressed: _closeMemberVisitsModal,
+                  tooltip: 'Kapat',
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.fromLTRB(
+                compact ? 20 : 26,
+                0,
+                compact ? 20 : 26,
+                compact ? 20 : 26,
+              ),
+              children: [
+                if (_adminError.isNotEmpty) ...[
+                  _InlineMessage(message: _adminError, color: _dangerColor),
+                  const SizedBox(height: 12),
+                ],
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _MetaPill(label: '${memberVisits.length} giris'),
+                    _MetaPill(
+                      label: memberVisits.isEmpty
+                          ? 'Henuz yok'
+                          : 'Son giris ${formatDate(memberVisits.first.createdAt)}',
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                if (memberVisits.isEmpty)
+                  Text(
+                    'Bu uye icin henuz giris kaydi yok.',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: _mutedColor,
+                        ),
+                  )
+                else
+                  Column(
+                    children: [
+                      for (var index = 0; index < memberVisits.length; index++) ...[
+                        _MemberVisitEventRow(
+                          memberLabel: member.label,
+                          createdAt: memberVisits[index].createdAt,
+                        ),
+                        if (index != memberVisits.length - 1)
+                          const SizedBox(height: 10),
+                      ],
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2017,7 +2278,7 @@ class _HomePageState extends State<HomePage> {
           ? _EmptyState(
               title: 'Henuz isim onerisi yok.',
               message: _currentMember == null
-                  ? 'Ilk oneriyi eklemek icin once giris yap.'
+                  ? 'Kayit olmadan bilgileri goremezsiniz.'
                   : _isPendingApproval
                       ? 'Admin onayindan sonra oneriler burada gorunur.'
                       : 'Ilk oneriyi ekleyerek listeyi baslatabilirsin.',
@@ -2633,12 +2894,14 @@ class _HeroSpotlightCard extends StatelessWidget {
     required this.summary,
     required this.memberLabel,
     required this.pendingOnlyMode,
+    required this.requiresRegistration,
   });
 
   final Suggestion? suggestion;
   final SuggestionSummary? summary;
   final String? memberLabel;
   final bool pendingOnlyMode;
+  final bool requiresRegistration;
 
   @override
   Widget build(BuildContext context) {
@@ -2677,6 +2940,33 @@ class _HeroSpotlightCard extends StatelessWidget {
                 ),
               ],
             )
+          : requiresRegistration
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Kayit gerekli',
+                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                            color: Colors.white.withValues(alpha: 0.72),
+                          ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      'Kayit olmadan bilgileri goremezsiniz.',
+                      style:
+                          Theme.of(context).textTheme.headlineSmall?.copyWith(
+                                color: Colors.white,
+                              ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Devam etmek icin once kayit olup giris yapman gerekir.',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color: Colors.white.withValues(alpha: 0.78),
+                          ),
+                    ),
+                  ],
+                )
           : suggestion == null || summary == null
               ? Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -2789,12 +3079,10 @@ class _AuthFormShell extends StatelessWidget {
 
 class _SuggestionOverlay extends StatelessWidget {
   const _SuggestionOverlay({
-    required this.suggestion,
     required this.onClose,
     required this.child,
   });
 
-  final Suggestion suggestion;
   final VoidCallback onClose;
   final Widget child;
 
@@ -3178,6 +3466,115 @@ class _PendingMemberCard extends StatelessWidget {
                 child: const Text('Reddet'),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MemberBadge extends StatelessWidget {
+  const _MemberBadge({
+    required this.member,
+    required this.isClickable,
+    this.onTap,
+  });
+
+  final Member member;
+  final bool isClickable;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final content = Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 14,
+        vertical: 12,
+      ),
+      decoration: BoxDecoration(
+        color: _surfaceAlt,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _borderColor),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '@${member.label}',
+            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: _primaryColor,
+                ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            member.approved ? 'onayli' : 'onay bekliyor',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: _mutedColor,
+                ),
+          ),
+          if (isClickable) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Girisleri gor',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: _accentColor,
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+          ],
+        ],
+      ),
+    );
+
+    if (!isClickable) {
+      return content;
+    }
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(18),
+      child: content,
+    );
+  }
+}
+
+class _MemberVisitEventRow extends StatelessWidget {
+  const _MemberVisitEventRow({
+    required this.memberLabel,
+    required this.createdAt,
+  });
+
+  final String memberLabel;
+  final DateTime createdAt;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.76),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _borderColor.withValues(alpha: 0.9)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              '@$memberLabel',
+              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                    color: _primaryColor,
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+          ),
+          Text(
+            formatDate(createdAt),
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: _mutedColor,
+                ),
           ),
         ],
       ),
@@ -3694,4 +4091,18 @@ class _EmptyState extends StatelessWidget {
       ],
     );
   }
+}
+
+class _AdminVisitLoadResult {
+  const _AdminVisitLoadResult({
+    required this.entries,
+    required this.errorMessage,
+  });
+
+  const _AdminVisitLoadResult.empty()
+      : entries = const [],
+        errorMessage = '';
+
+  final List<MemberVisitEntry> entries;
+  final String errorMessage;
 }

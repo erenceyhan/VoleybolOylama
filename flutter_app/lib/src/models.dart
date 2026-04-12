@@ -152,6 +152,26 @@ class SuggestionAsset {
   }
 }
 
+class MemberVisitEntry {
+  const MemberVisitEntry({
+    required this.id,
+    required this.memberId,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String memberId;
+  final DateTime createdAt;
+
+  factory MemberVisitEntry.fromRow(Map<String, dynamic> row) {
+    return MemberVisitEntry(
+      id: row['id'] as String,
+      memberId: row['member_id'] as String,
+      createdAt: DateTime.parse(row['created_at'] as String),
+    );
+  }
+}
+
 class AppData {
   const AppData({
     required this.members,

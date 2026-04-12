@@ -298,6 +298,22 @@ class AppRepository {
         .toList();
   }
 
+  Future<void> recordCurrentMemberVisit() {
+    return client.rpc('record_member_visit');
+  }
+
+  Future<List<MemberVisitEntry>> fetchMemberVisits() async {
+    final data = await client
+        .from('member_visits')
+        .select('id, member_id, created_at')
+        .order('created_at', ascending: false);
+
+    return (data as List<dynamic>)
+        .map((row) =>
+            MemberVisitEntry.fromRow(Map<String, dynamic>.from(row as Map)))
+        .toList();
+  }
+
   Future<void> updateMemberApproval(String memberId, bool approved) {
     return client.rpc(
       'admin_set_member_approval',
@@ -309,7 +325,25 @@ class AppRepository {
   }
 
   Future<void> rejectRemoteMember(String memberId) {
-    return client.rpc(
+    return deleteRemoteMember(memberId);
+  }
+
+  Future<void> deleteRemoteMember(String memberId) async {
+    final assetRows = await client
+        .from('suggestion_assets')
+        .select('storage_path')
+        .eq('member_id', memberId);
+    final paths = (assetRows as List<dynamic>)
+        .map((row) => (row as Map)['storage_path'] as String?)
+        .whereType<String>()
+        .where((path) => path.trim().isNotEmpty)
+        .toList();
+
+    if (paths.isNotEmpty) {
+      await client.storage.from(suggestionAssetBucket).remove(paths);
+    }
+
+    await client.rpc(
       'admin_reject_member',
       params: {
         'member_id_input': memberId,
