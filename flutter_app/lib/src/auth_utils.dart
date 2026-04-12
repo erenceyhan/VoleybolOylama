@@ -68,6 +68,7 @@ bool isSessionTimeoutError(Object error) {
 
   final lowered = message.toLowerCase();
   return lowered.contains('session_timeout') ||
+      lowered.contains('row-level security policy') ||
       lowered.contains('uzun sure islem yapilmadigi') ||
       lowered.contains('tekrar giris yapman gerekiyor');
 }

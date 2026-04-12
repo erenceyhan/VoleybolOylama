@@ -808,6 +808,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
 
       setState(() {
+        _authView = AuthView.login;
         _sessionMemberId = null;
         _appData = const AppData.empty();
         _pendingMembers = const [];
@@ -822,6 +823,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _loginError =
             'Uzun sure islem yapilmadigi icin tekrar giris yapman gerekiyor.';
       });
+      scrollToTop();
       _showError(_loginError);
     } catch (_) {
       // Oturum zaman asimi logout denemesi sessizce gecsin.
@@ -852,6 +854,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     setState(() {
+      _authView = AuthView.login;
       _sessionMemberId = null;
       _appData = const AppData.empty();
       _pendingMembers = const [];
@@ -866,12 +869,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _loginError =
           'Uzun sure islem yapilmadigi icin tekrar giris yapman gerekiyor.';
     });
+    scrollToTop();
     _showError(_loginError);
     return true;
   }
 
-  void _openSuggestionModal(String suggestionId) {
+  Future<bool> _ensureSessionActiveForUiAction() async {
+    if (_sessionMemberId == null) {
+      return false;
+    }
+
+    try {
+      await _repository.touchCurrentSession();
+      _rememberLastInteraction();
+      return true;
+    } catch (error) {
+      if (await _handlePossibleSessionTimeout(error)) {
+        return false;
+      }
+
+      _showError(getAuthErrorMessage(error));
+      return false;
+    }
+  }
+
+  Future<void> _openSuggestionModal(String suggestionId) async {
     if (!mounted) {
+      return;
+    }
+
+    if (!await _ensureSessionActiveForUiAction()) {
       return;
     }
 
@@ -915,8 +942,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _markInteraction();
   }
 
-  void _openMemberVisitsModal(String memberId) {
+  Future<void> _openMemberVisitsModal(String memberId) async {
     if (!mounted || !_isAdmin) {
+      return;
+    }
+
+    if (!await _ensureSessionActiveForUiAction()) {
       return;
     }
 
@@ -948,8 +979,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _markInteraction();
   }
 
-  void _openSuggestionAssetPreview(SuggestionAsset asset) {
+  Future<void> _openSuggestionAssetPreview(SuggestionAsset asset) async {
     if (!mounted) {
+      return;
+    }
+
+    if (!await _ensureSessionActiveForUiAction()) {
       return;
     }
 
@@ -2833,7 +2868,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       member: member,
                       isClickable: _isAdmin,
                       onTap: _isAdmin
-                          ? () => _openMemberVisitsModal(member.id)
+                          ? () => unawaited(_openMemberVisitsModal(member.id))
                           : null,
                     ),
                   )
@@ -3155,7 +3190,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     memberLabel:
                         _memberLabel(_orderedSuggestions[index].memberId),
                     onTap: () {
-                      _openSuggestionModal(_orderedSuggestions[index].id);
+                      unawaited(
+                        _openSuggestionModal(_orderedSuggestions[index].id),
+                      );
                     },
                   ),
                   if (index != _orderedSuggestions.length - 1)
@@ -3363,8 +3400,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                       _repository.getSuggestionAssetPublicUrl(
                                     asset.storagePath,
                                   ),
-                                  onPreview: () =>
-                                      _openSuggestionAssetPreview(asset),
+                                  onPreview: () => unawaited(
+                                    _openSuggestionAssetPreview(asset),
+                                  ),
                                   canDelete: _canDeleteSuggestionAsset(asset),
                                   onDelete: _isSubmitting
                                       ? null
