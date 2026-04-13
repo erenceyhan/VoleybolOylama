@@ -7,7 +7,8 @@ Bu proje iki farkli modda calisabilir:
 
 ## Su anki mimari
 
-- `React + Vite + TypeScript`
+- `Next.js + React + TypeScript`
+- `Tailwind CSS`
 - `Supabase Auth + Postgres`
 - GitHub Pages ile uyumlu statik on yuz
 
@@ -36,7 +37,7 @@ Ilk kurulumda admin hesabini once acman gerekir. Guvenlik nedeniyle admin sifres
 
 ### 1. SQL Editor
 
-Supabase projesinde `SQL Editor` ac ve [supabase/schema.sql](/c:/Users/gamer/Desktop/oylama%20sistemi/supabase/schema.sql) dosyasinin guncel icerigini calistir.
+Supabase projesinde `SQL Editor` ac ve `supabase/schema.sql` dosyasinin guncel icerigini calistir.
 
 Bu dosya sunlari ayarlar:
 
@@ -59,17 +60,17 @@ Supabase panelinde `Authentication > Providers > Email` altinda email/password a
 
 ### 3. Frontend env dosyasi
 
-`.env` dosyasinda su alanlar olmali:
+`.env.local` dosyasinda su alanlar olmali:
 
 ```bash
-VITE_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-VITE_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
 ```
 
 ## Onemli guvenlik notu
 
 - Frontend tarafinda `postgresql://...` baglanti dizesi kullanilmaz.
-- Frontend tarafinda sadece `VITE_SUPABASE_URL` ve `VITE_SUPABASE_ANON_KEY` kullanilir.
+- Frontend tarafinda sadece `NEXT_PUBLIC_SUPABASE_URL` ve `NEXT_PUBLIC_SUPABASE_ANON_KEY` kullanilir.
 - Supabase arayuzunde buna `publishable key` deniyor olabilir; frontend icin kullanilmasi guvenli olan anahtar budur.
 - `service_role` key ve gercek Postgres sifresi istemci koduna koyulmaz.
 
@@ -77,13 +78,13 @@ VITE_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
 
 ```bash
 npm install
-npm run dev -- --host 127.0.0.1 --port 4173 --strictPort
+npm run dev
 ```
 
 Ardindan tarayicida:
 
 ```text
-http://127.0.0.1:4173
+http://127.0.0.1:3000
 ```
 
 ## Build
@@ -96,5 +97,4 @@ npm run build
 
 - Bu repo GitHub Actions ile `main` branch'inden deploy olacak sekilde hazirlandi.
 - Repo adi `VoleybolOylama` oldugu surece yayin adresi `https://erenceyhan.github.io/VoleybolOylama/` olacak.
-- Eger ileride repo adini `erenceyhan.github.io` yaparsan veya custom domain baglarsan `vite.config.ts` icindeki otomatik base ayari kok dizine donecek sekilde zaten hazir.
-- Public oldugu icin `VITE_SUPABASE_URL` ve `VITE_SUPABASE_ANON_KEY` degerleri `.env.production` icine eklendi.
+- Public oldugu icin `NEXT_PUBLIC_SUPABASE_URL` ve `NEXT_PUBLIC_SUPABASE_ANON_KEY` degerleri `.env.production` icine eklendi.

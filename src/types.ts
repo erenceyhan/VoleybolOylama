@@ -32,9 +32,30 @@ export type Comment = {
   createdAt: string;
 };
 
+export type SuggestionAsset = {
+  id: string;
+  suggestionId: string;
+  memberId: string;
+  storagePath: string;
+  mimeType: string;
+  publicUrl: string;
+  createdAt: string;
+};
+
+export type MemberActivityLog = {
+  id: string;
+  memberId: string;
+  actionType: string;
+  targetType: string;
+  targetId: string | null;
+  details: Record<string, unknown>;
+  createdAt: string;
+};
+
 export type AppData = {
   members: Member[];
   suggestions: Suggestion[];
   votes: Vote[];
   comments: Comment[];
+  assets: SuggestionAsset[];
 };

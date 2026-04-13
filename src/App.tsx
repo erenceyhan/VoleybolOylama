@@ -1,26 +1,37 @@
+"use client";
+
 import { ChangeEvent, FormEvent, useEffect, useState } from "react";
-import {
-  ADMIN_USERNAME,
-  getAuthErrorMessage,
-  getPasswordRuleText,
-  isValidPassword,
-  isValidUsername,
-} from "./auth";
+import { useRouter } from "next/navigation";
+import { getAuthErrorMessage, isSessionTimeoutError } from "./auth";
+import { HeroSection } from "./components/hero-section";
+import { LocalToolsPanel } from "./components/local-tools-panel";
+import { MemberActivityPanel } from "./components/member-activity-panel";
+import { MembersPanel } from "./components/members-panel";
+import { ModalShell } from "./components/modal-shell";
+import { PendingMembersPanel } from "./components/account-panel";
+import { SessionPanel } from "./components/session-panel";
+import { SuggestionComposer } from "./components/suggestion-composer";
+import { SuggestionDetailPanel } from "./components/suggestion-detail-panel";
+import { SuggestionListPanel } from "./components/suggestion-list-panel";
+import { EmptyState, Panel } from "./components/ui";
 import {
   addRemoteComment,
   addRemoteSuggestion,
   deleteRemoteComment,
   deleteRemoteSuggestion,
+  deleteRemoteSuggestionAsset,
   deleteRemoteVote,
+  fetchMemberActivityLogs,
   fetchPendingMembers,
   fetchRemoteAppData,
+  fetchSuggestionAssetsForSuggestion,
   getRemoteSessionMember,
+  recordRemoteActivity,
   rejectRemoteMember,
-  signInWithUsernamePassword,
   signOutRemote,
-  signUpPendingMember,
   updateMemberApproval,
   updateRemoteSuggestionNote,
+  uploadRemoteSuggestionAsset,
   upsertRemoteVote,
 } from "./remote";
 import {
@@ -38,16 +49,20 @@ import {
   saveSessionMemberId,
 } from "./storage";
 import { hasSupabaseConfig } from "./supabaseClient";
-import type { AppData, Comment, Member, Suggestion, Vote } from "./types";
+import type {
+  AppData,
+  Comment,
+  Member,
+  MemberActivityLog,
+  Suggestion,
+  SuggestionAsset,
+} from "./types";
 import {
   clampVote,
   createId,
-  formatDate,
   getInitialAppData,
   getMemberSuggestionCount,
-  getSuggestionComments,
   getSuggestionSummary,
-  getSuggestionVotes,
 } from "./utils";
 
 type SuggestionDraft = {
@@ -55,28 +70,12 @@ type SuggestionDraft = {
   note: string;
 };
 
-type LocalLoginDraft = {
-  memberId: string;
-  accessCode: string;
-};
-
-type RemoteLoginDraft = {
-  username: string;
-  password: string;
-};
-
-type RegisterDraft = {
-  username: string;
-  password: string;
-};
-
-type AuthView = "login" | "register";
-
 const emptyAppData: AppData = {
   members: [],
   suggestions: [],
   votes: [],
   comments: [],
+  assets: [],
 };
 
 const emptySuggestionDraft: SuggestionDraft = {
@@ -84,22 +83,8 @@ const emptySuggestionDraft: SuggestionDraft = {
   note: "",
 };
 
-const emptyLocalLoginDraft: LocalLoginDraft = {
-  memberId: initialAppData.members[0]?.id ?? "",
-  accessCode: "",
-};
-
-const emptyRemoteLoginDraft: RemoteLoginDraft = {
-  username: "",
-  password: "",
-};
-
-const emptyRegisterDraft: RegisterDraft = {
-  username: "",
-  password: "",
-};
-
 function App() {
+  const router = useRouter();
   const remoteEnabled = hasSupabaseConfig;
   const [appData, setAppData] = useState<AppData>(() =>
     remoteEnabled ? emptyAppData : loadAppData(),
@@ -107,12 +92,6 @@ function App() {
   const [sessionMemberId, setSessionMemberId] = useState<string | null>(() =>
     remoteEnabled ? null : loadSessionMemberId(),
   );
-  const [localLoginDraft, setLocalLoginDraft] =
-    useState<LocalLoginDraft>(emptyLocalLoginDraft);
-  const [remoteLoginDraft, setRemoteLoginDraft] =
-    useState<RemoteLoginDraft>(emptyRemoteLoginDraft);
-  const [registerDraft, setRegisterDraft] =
-    useState<RegisterDraft>(emptyRegisterDraft);
   const [suggestionDraft, setSuggestionDraft] =
     useState<SuggestionDraft>(emptySuggestionDraft);
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
@@ -121,10 +100,18 @@ function App() {
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(
     () => (remoteEnabled ? null : initialAppData.suggestions[0]?.id ?? null),
   );
+  const [isSuggestionModalOpen, setIsSuggestionModalOpen] = useState(false);
+  const [modalAssets, setModalAssets] = useState<SuggestionAsset[]>([]);
+  const [isLoadingModalAssets, setIsLoadingModalAssets] = useState(false);
+  const [previewAsset, setPreviewAsset] = useState<SuggestionAsset | null>(null);
+  const [selectedMemberForLogs, setSelectedMemberForLogs] = useState<Member | null>(
+    null,
+  );
+  const [memberLogs, setMemberLogs] = useState<MemberActivityLog[]>([]);
+  const [isLoadingMemberLogs, setIsLoadingMemberLogs] = useState(false);
+  const [memberLogsError, setMemberLogsError] = useState("");
   const [pendingMembers, setPendingMembers] = useState<Member[]>([]);
-  const [authView, setAuthView] = useState<AuthView>("login");
-  const [loginError, setLoginError] = useState("");
-  const [authNotice, setAuthNotice] = useState("");
+  const [statusNotice, setStatusNotice] = useState("");
   const [suggestionError, setSuggestionError] = useState("");
   const [adminError, setAdminError] = useState("");
   const [isBootingRemote, setIsBootingRemote] = useState(remoteEnabled);
@@ -153,25 +140,15 @@ function App() {
 
   useEffect(() => {
     if (!remoteEnabled) {
+      if (!loadSessionMemberId()) {
+        router.replace("/");
+      }
+
       return;
     }
 
     void hydrateRemoteState();
-  }, [remoteEnabled]);
-
-  useEffect(() => {
-    if (!selectedSuggestionId && appData.suggestions[0]) {
-      setSelectedSuggestionId(appData.suggestions[0].id);
-      return;
-    }
-
-    if (
-      selectedSuggestionId &&
-      !appData.suggestions.some((suggestion) => suggestion.id === selectedSuggestionId)
-    ) {
-      setSelectedSuggestionId(appData.suggestions[0]?.id ?? null);
-    }
-  }, [appData.suggestions, selectedSuggestionId]);
+  }, [remoteEnabled, router]);
 
   const membersById = Object.fromEntries(
     appData.members.map((member) => [member.id, member]),
@@ -203,6 +180,9 @@ function App() {
     null;
 
   const activeVoters = new Set(appData.votes.map((vote) => vote.memberId)).size;
+  const approvedMemberCount = appData.members.filter(
+    (member) => member.approved !== false,
+  ).length;
   const isAdmin = currentMember?.role === "admin";
   const canParticipate = Boolean(
     currentMember && (!remoteEnabled || currentMember.approved || isAdmin),
@@ -219,6 +199,10 @@ function App() {
   const currentSelectedVote = selectedSuggestion
     ? getCurrentMemberVote(selectedSuggestion.id)
     : undefined;
+  const localUsageText =
+    currentMember && !remoteEnabled
+      ? `${getMemberSuggestionCount(appData.suggestions, currentMember.id)}/${MAX_SUGGESTIONS_PER_MEMBER} onerini kullandin.`
+      : undefined;
 
   useEffect(() => {
     if (!remoteEnabled || !sessionMemberId || !isPendingApproval) {
@@ -234,9 +218,118 @@ function App() {
     };
   }, [isPendingApproval, remoteEnabled, sessionMemberId]);
 
+  useEffect(() => {
+    if (!remoteEnabled || isBootingRemote) {
+      return;
+    }
+
+    if (!currentMember) {
+      router.replace("/");
+    }
+  }, [currentMember, isBootingRemote, remoteEnabled, router]);
+
+  useEffect(() => {
+    if (!selectedSuggestionId && appData.suggestions[0]) {
+      setSelectedSuggestionId(appData.suggestions[0].id);
+      return;
+    }
+
+    if (
+      selectedSuggestionId &&
+      !appData.suggestions.some((suggestion) => suggestion.id === selectedSuggestionId)
+    ) {
+      setSelectedSuggestionId(appData.suggestions[0]?.id ?? null);
+    }
+  }, [appData.suggestions, selectedSuggestionId]);
+
+  useEffect(() => {
+    if (!selectedSuggestion || !isSuggestionModalOpen) {
+      setModalAssets([]);
+      setIsLoadingModalAssets(false);
+      return;
+    }
+
+    if (!remoteEnabled) {
+      setModalAssets(
+        appData.assets.filter((asset) => asset.suggestionId === selectedSuggestion.id),
+      );
+      setIsLoadingModalAssets(false);
+      return;
+    }
+
+    let isActive = true;
+    setIsLoadingModalAssets(true);
+
+    void fetchSuggestionAssetsForSuggestion(
+      selectedSuggestion.id,
+      selectedSuggestion.memberId,
+    )
+      .then((result) => {
+        if (!isActive) {
+          return;
+        }
+
+        setModalAssets(result.assets);
+      })
+      .catch(async (error) => {
+        if (!isActive) {
+          return;
+        }
+
+        if (await handleSessionTimeout(error)) {
+          return;
+        }
+
+        setSuggestionError(getAuthErrorMessage(error));
+        setModalAssets([]);
+      })
+      .finally(() => {
+        if (isActive) {
+          setIsLoadingModalAssets(false);
+        }
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [appData.assets, isSuggestionModalOpen, remoteEnabled, selectedSuggestion]);
+
+  async function handleSessionTimeout(error: unknown) {
+    if (!remoteEnabled || !isSessionTimeoutError(error)) {
+      return false;
+    }
+
+    try {
+      await signOutRemote();
+    } catch {
+      // Sunucu tarafindaki oturum kaydi zaten kapanmis olabilir.
+    }
+
+    setSessionMemberId(null);
+    setAppData(emptyAppData);
+    setPendingMembers([]);
+    setSelectedSuggestionId(null);
+    setModalAssets([]);
+    setIsLoadingModalAssets(false);
+    setIsSuggestionModalOpen(false);
+    setPreviewAsset(null);
+    setSelectedMemberForLogs(null);
+    setMemberLogs([]);
+    setIsLoadingMemberLogs(false);
+    setMemberLogsError("");
+    setSuggestionError("");
+    setAdminError("");
+    setStatusNotice("");
+    clearSessionMemberId();
+    if (typeof window !== "undefined") {
+      window.sessionStorage.setItem("auth_timeout_notice", "1");
+    }
+    router.replace("/?reason=session-timeout");
+    return true;
+  }
+
   async function hydrateRemoteState() {
     setIsBootingRemote(true);
-    setLoginError("");
 
     try {
       const sessionMember = await getRemoteSessionMember();
@@ -260,7 +353,11 @@ function App() {
         setPendingMembers([]);
       }
     } catch (error) {
-      setLoginError(getAuthErrorMessage(error));
+      if (await handleSessionTimeout(error)) {
+        return;
+      }
+
+      setSuggestionError(getAuthErrorMessage(error));
     } finally {
       setIsBootingRemote(false);
     }
@@ -275,111 +372,29 @@ function App() {
     return true;
   }
 
-  function validateRemotePassword(password: string) {
-    if (!isValidPassword(password)) {
-      throw new Error(getPasswordRuleText());
-    }
-  }
-
-  function handleLocalLoginSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    const targetMember = appData.members.find(
-      (member) => member.id === localLoginDraft.memberId,
-    );
-
-    if (!targetMember || targetMember.accessCode !== localLoginDraft.accessCode.trim()) {
-      setLoginError("Isim ya da giris kodu hatali.");
-      return;
-    }
-
-    setSessionMemberId(targetMember.id);
-    setLoginError("");
-    setAuthNotice("");
-    setLocalLoginDraft((current) => ({ ...current, accessCode: "" }));
-  }
-
-  async function handleRemoteLoginSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setIsSubmitting(true);
-    setLoginError("");
-    setAuthNotice("");
-
-    try {
-      if (!isValidUsername(remoteLoginDraft.username)) {
-        throw new Error(
-          "Kullanici adi 3-24 karakter olmali ve sadece kucuk harf, rakam, nokta, tire veya alt cizgi icermeli.",
-        );
-      }
-
-      validateRemotePassword(remoteLoginDraft.password);
-
-      await signInWithUsernamePassword(
-        remoteLoginDraft.username,
-        remoteLoginDraft.password,
-      );
-      await hydrateRemoteState();
-      setRemoteLoginDraft(emptyRemoteLoginDraft);
-      setAuthNotice("Giris yapildi.");
-    } catch (error) {
-      setLoginError(getAuthErrorMessage(error));
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  async function handleRegisterSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setIsSubmitting(true);
-    setLoginError("");
-    setAuthNotice("");
-
-    try {
-      if (!isValidUsername(registerDraft.username)) {
-        throw new Error(
-          "Kullanici adi 3-24 karakter olmali ve sadece kucuk harf, rakam, nokta, tire veya alt cizgi icermeli.",
-        );
-      }
-
-      validateRemotePassword(registerDraft.password);
-
-      await signUpPendingMember(registerDraft);
-      await hydrateRemoteState();
-      setRegisterDraft(emptyRegisterDraft);
-      setAuthView("login");
-      setAuthNotice(
-        registerDraft.username.trim().toLowerCase() === ADMIN_USERNAME
-          ? "Admin hesabi acildi."
-          : "Kayit tamamlandi. Admin onayi bekleniyor.",
-      );
-    } catch (error) {
-      setLoginError(getAuthErrorMessage(error));
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
   async function handleLogout() {
     if (remoteEnabled) {
       setIsSubmitting(true);
 
       try {
         await signOutRemote();
-        setSessionMemberId(null);
-        setAppData(emptyAppData);
-        setPendingMembers([]);
-        setSelectedSuggestionId(null);
-        setAuthNotice("Cikis yapildi.");
       } catch (error) {
-        setLoginError(getAuthErrorMessage(error));
+        if (await handleSessionTimeout(error)) {
+          return;
+        }
+
+        setSuggestionError(getAuthErrorMessage(error));
       } finally {
         setIsSubmitting(false);
       }
-
-      return;
     }
 
     setSessionMemberId(null);
+    setAppData(remoteEnabled ? emptyAppData : appData);
+    setPendingMembers([]);
+    setSelectedSuggestionId(null);
+    clearSessionMemberId();
+    router.push("/");
   }
 
   async function handleAddSuggestion(event: FormEvent<HTMLFormElement>) {
@@ -421,6 +436,10 @@ function App() {
         setSuggestionDraft(emptySuggestionDraft);
         setSuggestionError("");
       } catch (error) {
+        if (await handleSessionTimeout(error)) {
+          return;
+        }
+
         setSuggestionError(getAuthErrorMessage(error));
       } finally {
         setIsSubmitting(false);
@@ -469,6 +488,10 @@ function App() {
         await upsertRemoteVote(suggestionId, safeValue);
         await hydrateRemoteState();
       } catch (error) {
+        if (await handleSessionTimeout(error)) {
+          return;
+        }
+
         setSuggestionError(getAuthErrorMessage(error));
       } finally {
         setIsSubmitting(false);
@@ -524,6 +547,10 @@ function App() {
         await deleteRemoteVote(suggestionId);
         await hydrateRemoteState();
       } catch (error) {
+        if (await handleSessionTimeout(error)) {
+          return;
+        }
+
         setSuggestionError(getAuthErrorMessage(error));
       } finally {
         setIsSubmitting(false);
@@ -568,6 +595,10 @@ function App() {
         await hydrateRemoteState();
         setCommentDrafts((current) => ({ ...current, [suggestionId]: "" }));
       } catch (error) {
+        if (await handleSessionTimeout(error)) {
+          return;
+        }
+
         setSuggestionError(getAuthErrorMessage(error));
       } finally {
         setIsSubmitting(false);
@@ -613,6 +644,10 @@ function App() {
           setEditingSuggestionNote("");
         }
       } catch (error) {
+        if (await handleSessionTimeout(error)) {
+          return;
+        }
+
         setSuggestionError(getAuthErrorMessage(error));
       } finally {
         setIsSubmitting(false);
@@ -627,6 +662,7 @@ function App() {
       votes: current.votes.filter((vote) => vote.suggestionId !== suggestionId),
       comments: current.comments.filter((comment) => comment.suggestionId !== suggestionId),
     }));
+
     if (editingSuggestionId === suggestionId) {
       setEditingSuggestionId(null);
       setEditingSuggestionNote("");
@@ -672,6 +708,10 @@ function App() {
         await hydrateRemoteState();
         cancelSuggestionNoteEdit();
       } catch (error) {
+        if (await handleSessionTimeout(error)) {
+          return;
+        }
+
         setSuggestionError(getAuthErrorMessage(error));
       } finally {
         setIsSubmitting(false);
@@ -703,6 +743,10 @@ function App() {
         await deleteRemoteComment(commentId);
         await hydrateRemoteState();
       } catch (error) {
+        if (await handleSessionTimeout(error)) {
+          return;
+        }
+
         setSuggestionError(getAuthErrorMessage(error));
       } finally {
         setIsSubmitting(false);
@@ -719,14 +763,18 @@ function App() {
 
   async function handleApproval(memberId: string, approved: boolean) {
     setAdminError("");
-    setAuthNotice("");
+    setStatusNotice("");
     setIsSubmitting(true);
 
     try {
       await updateMemberApproval(memberId, approved);
       await hydrateRemoteState();
-      setAuthNotice(approved ? "Uye onaylandi." : "Uye tekrar beklemeye alindi.");
+      setStatusNotice(approved ? "Uye onaylandi." : "Uye tekrar beklemeye alindi.");
     } catch (error) {
+      if (await handleSessionTimeout(error)) {
+        return;
+      }
+
       setAdminError(getAuthErrorMessage(error));
     } finally {
       setIsSubmitting(false);
@@ -743,17 +791,45 @@ function App() {
     }
 
     setAdminError("");
-    setAuthNotice("");
+    setStatusNotice("");
     setIsSubmitting(true);
 
     try {
       await rejectRemoteMember(memberId);
       await hydrateRemoteState();
-      setAuthNotice("Uyelik reddedildi.");
+      setStatusNotice("Uyelik reddedildi.");
     } catch (error) {
+      if (await handleSessionTimeout(error)) {
+        return;
+      }
+
       setAdminError(getAuthErrorMessage(error));
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  async function handleMemberSelect(member: Member) {
+    if (!remoteEnabled || !isAdmin) {
+      return;
+    }
+
+    setSelectedMemberForLogs(member);
+    setMemberLogs([]);
+    setMemberLogsError("");
+    setIsLoadingMemberLogs(true);
+
+    try {
+      const logs = await fetchMemberActivityLogs(member.id);
+      setMemberLogs(logs);
+    } catch (error) {
+      if (await handleSessionTimeout(error)) {
+        return;
+      }
+
+      setMemberLogsError(getAuthErrorMessage(error));
+    } finally {
+      setIsLoadingMemberLogs(false);
     }
   }
 
@@ -853,704 +929,350 @@ function App() {
     return member.username ?? member.name;
   }
 
+  async function handleAssetUpload(suggestionId: string, file: File) {
+    if (!remoteEnabled) {
+      setSuggestionError("SVG yukleme sadece Supabase modunda aktif.");
+      return;
+    }
+
+    const fileType = (file.type || "").toLowerCase();
+    const fileName = file.name.toLowerCase();
+
+    if (
+      fileType !== "image/svg+xml" &&
+      !fileName.endsWith(".svg")
+    ) {
+      setSuggestionError("Yalnizca SVG dosyasi yukleyebilirsin.");
+      return;
+    }
+
+    if (file.size > 400 * 1024) {
+      setSuggestionError("SVG dosyasi 400 KB sinirini asamaz.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    setSuggestionError("");
+
+      try {
+        await uploadRemoteSuggestionAsset(suggestionId, file);
+        await hydrateRemoteState();
+        if (selectedSuggestion && selectedSuggestion.id === suggestionId) {
+          const result = await fetchSuggestionAssetsForSuggestion(
+            selectedSuggestion.id,
+            selectedSuggestion.memberId,
+          );
+          setModalAssets(result.assets);
+        }
+    } catch (error) {
+      if (await handleSessionTimeout(error)) {
+        return;
+      }
+
+      setSuggestionError(getAuthErrorMessage(error));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function handleAssetDelete(asset: SuggestionAsset) {
+    const shouldDelete = window.confirm("Bu SVG dosyasini silmek istiyor musun?");
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    setSuggestionError("");
+
+    try {
+      await deleteRemoteSuggestionAsset(asset);
+      if (previewAsset?.id === asset.id) {
+        setPreviewAsset(null);
+      }
+      await hydrateRemoteState();
+      if (selectedSuggestion) {
+        const result = await fetchSuggestionAssetsForSuggestion(
+          selectedSuggestion.id,
+          selectedSuggestion.memberId,
+        );
+        setModalAssets(result.assets);
+      }
+    } catch (error) {
+      if (await handleSessionTimeout(error)) {
+        return;
+      }
+
+      setSuggestionError(getAuthErrorMessage(error));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  function canDeleteAsset(asset: SuggestionAsset) {
+    if (!currentMember) {
+      return false;
+    }
+
+    return currentMember.id === asset.memberId || isAdmin;
+  }
+
+  async function handleSuggestionSelect(suggestionId: string) {
+    if (!remoteEnabled) {
+      setSelectedSuggestionId(suggestionId);
+      setIsSuggestionModalOpen(true);
+      return;
+    }
+
+    try {
+      const targetSuggestion = appData.suggestions.find(
+        (suggestion) => suggestion.id === suggestionId,
+      );
+      await recordRemoteActivity("suggestion_open", "suggestion", suggestionId, {
+        suggestionTitle: targetSuggestion?.title ?? "",
+      });
+      setSelectedSuggestionId(suggestionId);
+      setIsSuggestionModalOpen(true);
+    } catch (error) {
+      if (await handleSessionTimeout(error)) {
+        return;
+      }
+
+      setSuggestionError(getAuthErrorMessage(error));
+    }
+  }
+
+  async function handleAssetPreview(asset: SuggestionAsset) {
+    setPreviewAsset(asset);
+  }
+
+  const canUploadAssets = Boolean(
+    remoteEnabled &&
+      currentMember &&
+      selectedSuggestion &&
+      currentMember.id === selectedSuggestion.memberId &&
+      canParticipate,
+  );
+
+  if (remoteEnabled && isBootingRemote && !currentMember) {
+    return (
+      <div className="min-h-screen px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8">
+        <main className="mx-auto grid max-w-7xl gap-6">
+          <HeroSection
+            showDemoBadge={false}
+            showStats={false}
+            memberCount={0}
+            suggestionCount={0}
+            activeVoters={0}
+            commentCount={0}
+          />
+          <Panel>
+            <EmptyState
+              title="Oturum yukleniyor."
+              description="Gecerli oturumun kontrol ediliyor. Birazdan panele gecilecek."
+            />
+          </Panel>
+        </main>
+      </div>
+    );
+  }
+
   return (
-    <div className="app-shell">
-      <main className="page">
-        <section className="hero">
-          <div className="hero-copy">
-            {!remoteEnabled ? <span className="eyebrow">Local demo modu</span> : null}
-            <h1>Voleybol takim adini birlikte secin.</h1>
-            <p>
-              Herkes en fazla 3 isim onerisi girebilir, tum oneriler 1 ile 5
-              arasinda puanlanabilir, yorum yapilabilir ve kim hangi puani vermis
-              tek ekranda gorulebilir.
-            </p>
-          </div>
-          {!pendingOnlyMode ? (
-            <div className="hero-stats">
-              <article className="stat-card">
-                <span>Uye</span>
-                <strong>{appData.members.filter((member) => member.approved !== false).length}</strong>
-              </article>
-              <article className="stat-card">
-                <span>Oneri</span>
-                <strong>{appData.suggestions.length}</strong>
-              </article>
-              <article className="stat-card">
-                <span>Aktif oylayan</span>
-                <strong>{activeVoters}</strong>
-              </article>
-              <article className="stat-card">
-                <span>Yorum</span>
-                <strong>{appData.comments.length}</strong>
-              </article>
-            </div>
-          ) : null}
-        </section>
+    <div className="min-h-screen px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8">
+      <main className="mx-auto grid max-w-7xl gap-6">
+        <HeroSection
+          showDemoBadge={!remoteEnabled}
+          showStats={!pendingOnlyMode}
+          memberCount={approvedMemberCount}
+          suggestionCount={appData.suggestions.length}
+          activeVoters={activeVoters}
+          commentCount={appData.comments.length}
+        />
 
         {!remoteEnabled ? (
-          <section className="notice-panel">
-            <div>
-              <h2>Bu ilk surum nasil calisiyor?</h2>
-              <p>
-                Bu prototip verileri tarayici icindeki local storage alaninda
-                tutuyor. Gercek ortak kullanim icin .env dosyasina Supabase URL ve
-                key eklemen yeterli.
-              </p>
-            </div>
-            <div className="notice-actions">
-              <button type="button" className="secondary-button" onClick={handleExport}>
-                JSON disa aktar
-              </button>
-              <label className="secondary-button file-button">
-                JSON ice aktar
-                <input type="file" accept="application/json" onChange={handleImport} />
-              </label>
-              <button type="button" className="ghost-button" onClick={handleReset}>
-                Demo verisini sifirla
-              </button>
-            </div>
-          </section>
+          <LocalToolsPanel
+            onExport={handleExport}
+            onImport={handleImport}
+            onReset={handleReset}
+          />
         ) : null}
 
-        <section className="layout-grid">
-          <div className="column-stack">
-            <section className="panel">
-              <div className="panel-heading">
-                <div>
-                  <h2>{remoteEnabled ? "Hesap" : "Giris"}</h2>
-                  {!remoteEnabled ? (
-                    <p>Su anki yerel surumde uye bilgileri kod icinde tutuluyor.</p>
-                  ) : null}
-                </div>
-                {currentMember ? (
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={() => void handleLogout()}
-                    disabled={isSubmitting}
-                  >
-                    Cikis yap
-                  </button>
-                ) : null}
-              </div>
-
-              {isBootingRemote ? (
-                <p className="muted-text">Supabase oturumu kontrol ediliyor...</p>
-              ) : currentMember ? (
-                <>
-                  <div className="current-member">
-                    <span>Aktif kisi</span>
-                    <strong>{currentMember.username ?? currentMember.name}</strong>
-                    <small>
-                      @{currentMember.username ?? "yerel"} - {currentMember.role}
-                    </small>
-                    <small>
-                      {remoteEnabled
-                        ? currentMember.approved || isAdmin
-                          ? "Durum: onayli"
-                          : "Durum: onay bekliyor"
-                        : `${getMemberSuggestionCount(appData.suggestions, currentMember.id)}/${MAX_SUGGESTIONS_PER_MEMBER} onerini kullandin.`}
-                    </small>
-                  </div>
-                  {isPendingApproval ? (
-                    <div className="warning-card">
-                      <strong>Onay bekleniyor</strong>
-                      <p>
-                        Kaydin alindi. Admin onay verene kadar oy, yorum ve isim onerisi
-                        gonderemezsin.
-                      </p>
-                    </div>
-                  ) : null}
-                </>
-              ) : remoteEnabled ? (
-                <>
-                  <div className="auth-switch">
-                    <button
-                      type="button"
-                      className={authView === "login" ? "auth-tab is-active" : "auth-tab"}
-                      onClick={() => setAuthView("login")}
-                    >
-                      Giris
-                    </button>
-                    <button
-                      type="button"
-                      className={authView === "register" ? "auth-tab is-active" : "auth-tab"}
-                      onClick={() => setAuthView("register")}
-                    >
-                      Kayit
-                    </button>
-                  </div>
-
-                  {authView === "login" ? (
-                    <form className="stack-form" onSubmit={handleRemoteLoginSubmit}>
-                      <label>
-                        Kullanici adi
-                        <input
-                          type="text"
-                          value={remoteLoginDraft.username}
-                          placeholder="ornek: mert"
-                          onChange={(event) =>
-                            setRemoteLoginDraft((current) => ({
-                              ...current,
-                              username: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                      <label>
-                        Sifre
-                        <input
-                          type="password"
-                          value={remoteLoginDraft.password}
-                          onChange={(event) =>
-                            setRemoteLoginDraft((current) => ({
-                              ...current,
-                              password: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                      {loginError ? <p className="error-text">{loginError}</p> : null}
-                      {authNotice ? <p className="success-text">{authNotice}</p> : null}
-                      <button
-                        type="submit"
-                        className="primary-button"
-                        disabled={isSubmitting}
-                      >
-                        Giris yap
-                      </button>
-                    </form>
-                  ) : (
-                    <form className="stack-form" onSubmit={handleRegisterSubmit}>
-                      <label>
-                        Kullanici adi
-                        <input
-                          type="text"
-                          value={registerDraft.username}
-                          placeholder="kullanici adin"
-                          onChange={(event) =>
-                            setRegisterDraft((current) => ({
-                              ...current,
-                              username: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                      <label>
-                        Sifre
-                        <input
-                          type="password"
-                          value={registerDraft.password}
-                          onChange={(event) =>
-                            setRegisterDraft((current) => ({
-                              ...current,
-                              password: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                      <p className="muted-text">
-                        {getPasswordRuleText()}
-                      </p>
-                      {loginError ? <p className="error-text">{loginError}</p> : null}
-                      {authNotice ? <p className="success-text">{authNotice}</p> : null}
-                      <button
-                        type="submit"
-                        className="primary-button"
-                        disabled={isSubmitting}
-                      >
-                        Kaydi tamamla
-                      </button>
-                    </form>
-                  )}
-                </>
-              ) : (
-                <form className="stack-form" onSubmit={handleLocalLoginSubmit}>
-                  <label>
-                    Kisi
-                    <select
-                      value={localLoginDraft.memberId}
-                      onChange={(event) =>
-                        setLocalLoginDraft((current) => ({
-                          ...current,
-                          memberId: event.target.value,
-                        }))
-                      }
-                    >
-                      {appData.members.map((member) => (
-                        <option key={member.id} value={member.id}>
-                          {member.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Giris kodu
-                    <input
-                      type="password"
-                      inputMode="numeric"
-                      value={localLoginDraft.accessCode}
-                      placeholder="Ornek: 2001"
-                      onChange={(event) =>
-                        setLocalLoginDraft((current) => ({
-                          ...current,
-                          accessCode: event.target.value,
-                        }))
-                      }
-                    />
-                  </label>
-                  {loginError ? <p className="error-text">{loginError}</p> : null}
-                  <button type="submit" className="primary-button">
-                    Giris yap
-                  </button>
-                </form>
-              )}
-            </section>
+        <section className="grid gap-6 xl:grid-cols-[380px_minmax(0,1fr)] xl:items-start">
+          <div className="grid gap-6">
+            <SessionPanel
+              currentMember={currentMember}
+              remoteEnabled={remoteEnabled}
+              isAdmin={Boolean(isAdmin)}
+              isPendingApproval={isPendingApproval}
+              isBooting={isBootingRemote}
+              isSubmitting={isSubmitting}
+              localUsageText={localUsageText}
+              onLogout={() => void handleLogout()}
+            />
 
             {isAdmin && remoteEnabled ? (
-              <section className="panel">
-                <div className="panel-heading">
-                  <div>
-                    <h2>Onay bekleyen uyeler</h2>
-                    <p>
-                      Yeni kayit olanlar burada gorunur. Onay verdiginde uygulamayi
-                      kullanmaya baslarlar.
-                    </p>
-                  </div>
-                </div>
-
-                {adminError ? <p className="error-text">{adminError}</p> : null}
-                {authNotice ? <p className="success-text">{authNotice}</p> : null}
-
-                <div className="invite-list">
-                      {pendingMembers.length === 0 ? (
-                        <p className="muted-text">Su an onay bekleyen uye yok.</p>
-                      ) : (
-                        pendingMembers.map((member) => (
-                          <article key={member.id} className="invite-card">
-                            <div className="invite-head">
-                              <strong>@{member.username ?? member.name}</strong>
-                              <span>{member.role}</span>
-                            </div>
-                            <div className="inline-actions">
-                              <button
-                                type="button"
-                                className="primary-button"
-                                onClick={() => void handleApproval(member.id, true)}
-                                disabled={isSubmitting}
-                              >
-                                Onayla
-                              </button>
-                              <button
-                                type="button"
-                                className="ghost-button danger-button"
-                                onClick={() => void handleRejectMember(member.id)}
-                                disabled={isSubmitting}
-                              >
-                                Reddet
-                              </button>
-                            </div>
-                          </article>
-                        ))
-                      )}
-                </div>
-              </section>
+              <PendingMembersPanel
+                members={pendingMembers}
+                adminError={adminError}
+                authNotice={statusNotice}
+                isSubmitting={isSubmitting}
+                onApprove={(memberId) => void handleApproval(memberId, true)}
+                onReject={(memberId) => void handleRejectMember(memberId)}
+              />
             ) : null}
 
             {!pendingOnlyMode ? (
               <>
-            <section className="panel">
-              <div className="panel-heading">
-                <div>
-                  <h2>Yeni isim onerisi</h2>
-                  <p>
-                    {remoteEnabled
-                      ? `Oneri eklemek icin once kayit olup giris yapman ve onay alman gerekir. Kisi basi en fazla ${MAX_SUGGESTIONS_PER_MEMBER} oneri yapilabilir.`
-                      : `Kisi basi en fazla ${MAX_SUGGESTIONS_PER_MEMBER} oneri yapilabilir.`}
-                  </p>
-                </div>
-              </div>
-              <form className="stack-form" onSubmit={(event) => void handleAddSuggestion(event)}>
-                <label>
-                  Takim ismi
-                  <input
-                    type="text"
-                    maxLength={40}
-                    value={suggestionDraft.title}
-                    placeholder="Ornek: Blok Cizgisi"
-                    onChange={(event) =>
-                      setSuggestionDraft((current) => ({
-                        ...current,
-                        title: event.target.value,
-                      }))
-                    }
-                    disabled={!canParticipate && remoteEnabled}
-                  />
-                </label>
-                <label>
-                  Kisa not
-                  <textarea
-                    rows={4}
-                    maxLength={300}
-                    value={suggestionDraft.note}
-                    placeholder="Bu ismi neden sevdigini biraz daha detayli yazabilirsin."
-                    onChange={(event) =>
-                      setSuggestionDraft((current) => ({
-                        ...current,
-                        note: event.target.value,
-                      }))
-                    }
-                    disabled={!canParticipate && remoteEnabled}
-                  />
-                </label>
-                {suggestionError ? <p className="error-text">{suggestionError}</p> : null}
-                <button
-                  type="submit"
-                  className="primary-button"
-                  disabled={isSubmitting || (remoteEnabled && !canParticipate)}
-                >
-                  Oneriyi ekle
-                </button>
-              </form>
-            </section>
+                <SuggestionComposer
+                  remoteEnabled={remoteEnabled}
+                  canParticipate={canParticipate}
+                  isSubmitting={isSubmitting}
+                  draft={suggestionDraft}
+                  error={suggestionError}
+                  maxSuggestionsPerMember={MAX_SUGGESTIONS_PER_MEMBER}
+                  onChange={(field, value) =>
+                    setSuggestionDraft((current) => ({ ...current, [field]: value }))
+                  }
+                  onSubmit={(event) => void handleAddSuggestion(event)}
+                />
 
-            <section className="panel">
-              <div className="panel-heading">
-                <div>
-                  <h2>Uyeler</h2>
-                  {!remoteEnabled ? (
-                    <p>16 kisilik kadroyu su an kod icinden yonetiyoruz.</p>
-                  ) : null}
-                </div>
-              </div>
-              <div className="member-list">
-                {appData.members.length === 0 ? (
-                  <p className="muted-text">
-                    {remoteEnabled
-                      ? "Uyeleri gormek icin once giris yap."
-                      : "Henuz uye yok."}
-                  </p>
-                ) : (
-                  appData.members.map((member) => (
-                    <article key={member.id} className="member-chip">
-                      <strong>@{member.username ?? member.name}</strong>
-                      {remoteEnabled ? (
-                        <span>{member.approved ? "onayli" : "onay bekliyor"}</span>
-                      ) : (
-                        <span>
-                          {getMemberSuggestionCount(appData.suggestions, member.id)} onerisi
-                        </span>
-                      )}
-                    </article>
-                  ))
-                )}
-              </div>
-            </section>
+                <MembersPanel
+                  members={appData.members}
+                  suggestions={appData.suggestions}
+                  remoteEnabled={remoteEnabled}
+                  isAdmin={remoteEnabled && Boolean(isAdmin)}
+                  onSelectMember={(member) => {
+                    void handleMemberSelect(member);
+                  }}
+                />
               </>
             ) : null}
           </div>
 
-          {!pendingOnlyMode ? (
-            <>
-          <section className="panel list-panel">
-            <div className="panel-heading">
-              <div>
-                <h2>Oneri listesi</h2>
-                <p>Toplam puan once gelir, esitlikte ortalama ve son eklenen belirler.</p>
-              </div>
+          {pendingOnlyMode ? (
+            <Panel>
+              <EmptyState
+                title="Onay bekleniyor."
+                description="Admin onayi gelince oneriler, yorumlar ve puanlama ekrani otomatik olarak acilacak."
+              />
+            </Panel>
+          ) : (
+            <div className="grid gap-6">
+              <SuggestionListPanel
+                suggestions={orderedSuggestions}
+                votes={appData.votes}
+                remoteEnabled={remoteEnabled}
+                currentMemberId={currentMember?.id ?? null}
+                isPendingApproval={isPendingApproval}
+                selectedSuggestionId={
+                  isSuggestionModalOpen ? selectedSuggestion?.id ?? null : null
+                }
+                getMemberLabel={getMemberLabel}
+                getCurrentMemberVote={getCurrentMemberVote}
+                onSelect={(suggestionId) => {
+                  void handleSuggestionSelect(suggestionId);
+                }}
+              />
             </div>
-
-            {orderedSuggestions.length === 0 ? (
-              <div className="empty-state">
-                <strong>Henuz isim onerisi yok.</strong>
-                <p>
-                  {remoteEnabled
-                    ? currentMember
-                      ? isPendingApproval
-                        ? "Admin onayindan sonra oneriler burada gorunur."
-                        : "Ilk oneriyi ekleyerek listeyi baslatabilirsin."
-                      : "Ilk oneriyi eklemek icin once giris yap."
-                    : "Ilk oneriyi ekleyerek listeyi baslatabilirsin."}
-                </p>
-              </div>
-            ) : (
-              <div className="suggestion-list">
-                {orderedSuggestions.map((suggestion, index) => {
-                  const summary = getSuggestionSummary(appData.votes, suggestion.id);
-                  const isSelected = suggestion.id === selectedSuggestion?.id;
-                  const userVote = getCurrentMemberVote(suggestion.id);
-
-                  return (
-                    <button
-                      key={suggestion.id}
-                      type="button"
-                      className={`suggestion-card ${isSelected ? "is-selected" : ""}`}
-                      onClick={() => setSelectedSuggestionId(suggestion.id)}
-                    >
-                      <div className="suggestion-head">
-                        <div>
-                          <span className="suggestion-rank">#{index + 1}</span>
-                          <h3>{suggestion.title}</h3>
-                        </div>
-                        <div className="score-badge">
-                          <strong>{summary.totalScore}</strong>
-                          <span>toplam puan</span>
-                        </div>
-                      </div>
-                      <p>{suggestion.note || "Ek not girilmedi."}</p>
-                      <div className="suggestion-meta">
-                        <span>@{getMemberLabel(suggestion.memberId)}</span>
-                        <span>{summary.voteCount} oy</span>
-                        <span>Ort. {summary.averageScore.toFixed(1)}</span>
-                        {userVote ? <span>Senin oyun: {userVote}</span> : null}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-
-          <section className="panel detail-panel">
-            {selectedSuggestion ? (
-              <>
-                <div className="panel-heading">
-                  <div>
-                    <h2>{selectedSuggestion.title}</h2>
-                    <p>
-                      @{getMemberLabel(selectedSuggestion.memberId)} tarafindan{" "}
-                      {formatDate(selectedSuggestion.createdAt)} tarihinde eklendi.
-                    </p>
-                  </div>
-                  {canDeleteSuggestion(selectedSuggestion) ? (
-                    <button
-                      type="button"
-                      className="ghost-button danger-button"
-                      onClick={() => void handleDeleteSuggestion(selectedSuggestion.id)}
-                      disabled={isSubmitting}
-                    >
-                      Oneriyi sil
-                    </button>
-                  ) : null}
-                </div>
-
-                <div className="detail-summary">
-                  <article>
-                    <span>Toplam puan</span>
-                    <strong>
-                      {getSuggestionSummary(appData.votes, selectedSuggestion.id).totalScore}
-                    </strong>
-                  </article>
-                  <article>
-                    <span>Ortalama</span>
-                    <strong>
-                      {getSuggestionSummary(appData.votes, selectedSuggestion.id).averageScore.toFixed(1)}
-                    </strong>
-                  </article>
-                  <article>
-                    <span>Oy sayisi</span>
-                    <strong>
-                      {getSuggestionSummary(appData.votes, selectedSuggestion.id).voteCount}
-                    </strong>
-                  </article>
-                </div>
-
-                <div className="detail-block">
-                  <div className="detail-head">
-                    <h3>Oneri notu</h3>
-                    {canEditSuggestionNote(selectedSuggestion) &&
-                    editingSuggestionId !== selectedSuggestion.id ? (
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        onClick={() => startSuggestionNoteEdit(selectedSuggestion)}
-                        disabled={isSubmitting}
-                      >
-                        Duzenle
-                      </button>
-                    ) : null}
-                  </div>
-                  {editingSuggestionId === selectedSuggestion.id ? (
-                    <form
-                      className="stack-form"
-                      onSubmit={(event) =>
-                        void handleSuggestionNoteSave(event, selectedSuggestion.id)
-                      }
-                    >
-                      <textarea
-                        rows={4}
-                        maxLength={300}
-                        value={editingSuggestionNote}
-                        placeholder="Bu ismi neden sectigini yaz."
-                        onChange={(event) => setEditingSuggestionNote(event.target.value)}
-                        disabled={isSubmitting}
-                      />
-                      <div className="inline-actions">
-                        <button
-                          type="submit"
-                          className="primary-button"
-                          disabled={isSubmitting}
-                        >
-                          Kaydet
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          onClick={cancelSuggestionNoteEdit}
-                          disabled={isSubmitting}
-                        >
-                          Vazgec
-                        </button>
-                      </div>
-                    </form>
-                  ) : (
-                    <p>{selectedSuggestion.note || "Bu oneride ek bir not yok."}</p>
-                  )}
-                </div>
-
-                <div className="detail-block">
-                  <h3>Puan ver</h3>
-                  {canParticipate ? (
-                    isOwnSelectedSuggestion ? (
-                      <p className="muted-text">Kendi onerine puan veremezsin.</p>
-                    ) : (
-                    <>
-                      <div className="vote-grid">
-                        {Array.from(
-                          { length: MAX_VOTE - MIN_VOTE + 1 },
-                          (_, index) => index + MIN_VOTE,
-                        ).map((value) => (
-                          <button
-                            key={value}
-                            type="button"
-                            className={`vote-button ${
-                              currentSelectedVote === value ? "is-active" : ""
-                            }`}
-                            onClick={() => void handleVote(selectedSuggestion.id, value)}
-                            disabled={isSubmitting}
-                          >
-                            {value}
-                          </button>
-                        ))}
-                      </div>
-                      {currentSelectedVote ? (
-                        <button
-                          type="button"
-                          className="ghost-button inline-top"
-                          onClick={() => void handleClearVote(selectedSuggestion.id)}
-                          disabled={isSubmitting}
-                        >
-                          Oyumu geri al
-                        </button>
-                      ) : null}
-                    </>
-                    )
-                  ) : (
-                    <p className="muted-text">
-                      {isPendingApproval
-                        ? "Admin onayi gelene kadar oy kullanamazsin."
-                        : "Oy kullanmak icin once giris yap."}
-                    </p>
-                  )}
-                </div>
-
-                <div className="detail-block">
-                  <h3>Kim hangi puani verdi?</h3>
-                  <div className="vote-list">
-                    {getSuggestionVotes(appData.votes, selectedSuggestion.id).length === 0 ? (
-                      <p className="muted-text">Bu oneride henuz oy yok.</p>
-                    ) : (
-                      getSuggestionVotes(appData.votes, selectedSuggestion.id)
-                        .sort((left, right) => right.value - left.value)
-                        .map((vote) => (
-                          <article key={`${vote.memberId}-${vote.suggestionId}`} className="vote-row">
-                            <strong>@{getMemberLabel(vote.memberId)}</strong>
-                            <span>{vote.value} puan</span>
-                            <small>{formatDate(vote.updatedAt)}</small>
-                          </article>
-                        ))
-                    )}
-                  </div>
-                </div>
-
-                <div className="detail-block">
-                  <h3>Yorumlar</h3>
-                  {canParticipate ? (
-                    <form
-                      className="comment-form"
-                      onSubmit={(event) =>
-                        void handleCommentSubmit(event, selectedSuggestion.id)
-                      }
-                    >
-                      <textarea
-                        rows={3}
-                        maxLength={200}
-                        value={commentDrafts[selectedSuggestion.id] ?? ""}
-                        placeholder="Bu isim hakkindaki fikrini yaz."
-                        onChange={(event) =>
-                          handleCommentDraftChange(
-                            selectedSuggestion.id,
-                            event.target.value,
-                          )
-                        }
-                      />
-                      <button
-                        type="submit"
-                        className="primary-button"
-                        disabled={isSubmitting}
-                      >
-                        Yorumu ekle
-                      </button>
-                    </form>
-                  ) : (
-                    <p className="muted-text">
-                      {isPendingApproval
-                        ? "Admin onayi gelene kadar yorum yapamazsin."
-                        : "Yorum yapmak icin once giris yap."}
-                    </p>
-                  )}
-
-                  <div className="comment-list">
-                    {getSuggestionComments(appData.comments, selectedSuggestion.id).length === 0 ? (
-                      <p className="muted-text">Bu oneride henuz yorum yok.</p>
-                    ) : (
-                      getSuggestionComments(appData.comments, selectedSuggestion.id).map(
-                        (comment) => (
-                          <article key={comment.id} className="comment-card">
-                            <div className="comment-meta">
-                              <strong>@{getMemberLabel(comment.memberId)}</strong>
-                              <span>{formatDate(comment.createdAt)}</span>
-                            </div>
-                            <p>{comment.message}</p>
-                            {canManageComment(comment) ? (
-                              <button
-                                type="button"
-                                className="ghost-button inline-top danger-button"
-                                onClick={() => void handleDeleteComment(comment.id)}
-                                disabled={isSubmitting}
-                              >
-                                Yorumu sil
-                              </button>
-                            ) : null}
-                          </article>
-                        ),
-                      )
-                    )}
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="empty-state">
-                <strong>Detay gormek icin bir isim sec.</strong>
-                <p>Listeye ilk oneriyi ekledikten sonra detaylar burada acilir.</p>
-              </div>
-            )}
-          </section>
-            </>
-          ) : null}
+          )}
         </section>
       </main>
+
+      {isSuggestionModalOpen && selectedSuggestion ? (
+        <ModalShell
+          title={selectedSuggestion.title}
+          onClose={() => {
+            setIsSuggestionModalOpen(false);
+            setModalAssets([]);
+            setIsLoadingModalAssets(false);
+            setPreviewAsset(null);
+          }}
+          className="sm:max-w-6xl"
+        >
+          <SuggestionDetailPanel
+            suggestion={selectedSuggestion}
+            votes={appData.votes}
+            comments={appData.comments}
+            assets={modalAssets}
+            embedded
+            remoteEnabled={remoteEnabled}
+            canParticipate={canParticipate}
+            isPendingApproval={isPendingApproval}
+            isOwnSuggestion={isOwnSelectedSuggestion}
+            currentSelectedVote={currentSelectedVote}
+            editingSuggestionId={editingSuggestionId}
+            editingSuggestionNote={editingSuggestionNote}
+            commentDraft={selectedSuggestion ? commentDrafts[selectedSuggestion.id] ?? "" : ""}
+            suggestionError={suggestionError}
+            isSubmitting={isSubmitting}
+            getMemberLabel={getMemberLabel}
+            canDeleteSuggestion={canDeleteSuggestion}
+            canEditSuggestionNote={canEditSuggestionNote}
+            canManageComment={canManageComment}
+            canUploadAssets={canUploadAssets}
+            canDeleteAsset={canDeleteAsset}
+            onDeleteSuggestion={(suggestionId) => void handleDeleteSuggestion(suggestionId)}
+            onDeleteComment={(commentId) => void handleDeleteComment(commentId)}
+            onUploadAsset={(suggestionId, file) => void handleAssetUpload(suggestionId, file)}
+            onDeleteAsset={(asset) => void handleAssetDelete(asset)}
+            onPreviewAsset={(asset) => {
+              void handleAssetPreview(asset);
+            }}
+            onStartEdit={startSuggestionNoteEdit}
+            onCancelEdit={cancelSuggestionNoteEdit}
+            onEditNoteChange={setEditingSuggestionNote}
+            onSaveNote={(event, suggestionId) =>
+              void handleSuggestionNoteSave(event, suggestionId)
+            }
+            onVote={(suggestionId, value) => void handleVote(suggestionId, value)}
+            onClearVote={(suggestionId) => void handleClearVote(suggestionId)}
+            onCommentDraftChange={handleCommentDraftChange}
+            onSubmitComment={(event, suggestionId) =>
+              void handleCommentSubmit(event, suggestionId)
+            }
+            minVote={MIN_VOTE}
+            maxVote={MAX_VOTE}
+            assetsLoading={isLoadingModalAssets}
+          />
+        </ModalShell>
+      ) : null}
+
+      {previewAsset ? (
+        <ModalShell
+          title="SVG onizleme"
+          onClose={() => setPreviewAsset(null)}
+          className="sm:max-w-4xl"
+        >
+          <div className="flex min-h-[40vh] items-center justify-center rounded-[28px] border border-[rgba(141,106,232,0.12)] bg-[radial-gradient(circle_at_top,rgba(217,106,167,0.12),transparent_48%),radial-gradient(circle_at_bottom,rgba(98,180,131,0.1),transparent_42%),linear-gradient(180deg,rgba(255,248,252,0.98),rgba(246,241,255,0.95))] p-6">
+            <img
+              src={previewAsset.publicUrl}
+              alt="SVG onizleme"
+              className="max-h-[68vh] max-w-full object-contain"
+            />
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {selectedMemberForLogs ? (
+        <ModalShell
+          title={`@${selectedMemberForLogs.username ?? selectedMemberForLogs.name}`}
+          onClose={() => {
+            setSelectedMemberForLogs(null);
+            setMemberLogs([]);
+            setIsLoadingMemberLogs(false);
+            setMemberLogsError("");
+          }}
+          className="sm:max-w-4xl"
+        >
+          <MemberActivityPanel
+            member={selectedMemberForLogs}
+            suggestions={appData.suggestions}
+            logs={memberLogs}
+            isLoading={isLoadingMemberLogs}
+            error={memberLogsError}
+          />
+        </ModalShell>
+      ) : null}
     </div>
   );
 }

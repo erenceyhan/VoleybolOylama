@@ -79,4 +79,5 @@ export const initialAppData: AppData = {
       createdAt: "2026-04-10T18:25:00.000Z",
     },
   ],
+  assets: [],
 };

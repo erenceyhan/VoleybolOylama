@@ -1,6 +1,9 @@
 create extension if not exists pgcrypto;
 
 drop function if exists public.record_member_visit();
+drop function if exists public.begin_current_session();
+drop function if exists public.touch_current_session();
+drop function if exists public.end_current_session();
 drop table if exists public.member_visits cascade;
 
 create table if not exists public.profiles (
@@ -11,7 +14,6 @@ create table if not exists public.profiles (
   approved boolean not null default false,
   approved_at timestamptz,
   approved_by uuid references public.profiles (id) on delete set null,
-  last_activity_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -23,9 +25,6 @@ alter table public.profiles
 
 alter table public.profiles
   add column if not exists approved_by uuid references public.profiles (id) on delete set null;
-
-alter table public.profiles
-  add column if not exists last_activity_at timestamptz;
 
 create table if not exists public.suggestions (
   id uuid primary key default gen_random_uuid(),
@@ -119,11 +118,19 @@ stable
 security definer
 set search_path = public
 as $$
+  with latest_log as (
+    select action_type, created_at
+    from public.member_activity_logs
+    where member_id = auth.uid()
+    order by created_at desc
+    limit 1
+  )
   select coalesce(
-    (
-      select last_activity_at >= now() - interval '2 minutes'
-      from public.profiles
-      where id = auth.uid()
+    exists (
+      select 1
+      from latest_log
+      where action_type not in ('logout', 'session_timeout')
+        and created_at >= now() - interval '30 minutes'
     ),
     false
   );
@@ -195,6 +202,125 @@ before insert or update on public.suggestion_assets
 for each row
 execute function public.enforce_suggestion_asset_rules();
 
+create or replace function public.get_suggestion_assets(
+  suggestion_id_input uuid
+)
+returns setof public.suggestion_assets
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'Gecerli bir oturum bulunamadi.';
+  end if;
+
+  if not (
+    public.current_profile_is_approved()
+    or public.current_profile_role() = 'admin'
+  ) then
+    raise exception 'Bu islem icin yetkin bulunmuyor.';
+  end if;
+
+  return query
+  select *
+  from public.suggestion_assets
+  where suggestion_id = suggestion_id_input
+  order by created_at asc;
+end;
+$$;
+
+create or replace function public.insert_suggestion_asset(
+  suggestion_id_input uuid,
+  storage_path_input text,
+  mime_type_input text default 'image/svg+xml'
+)
+returns public.suggestion_assets
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  suggestion_owner_id uuid;
+  asset_row public.suggestion_assets;
+begin
+  if auth.uid() is null then
+    raise exception 'Gecerli bir oturum bulunamadi.';
+  end if;
+
+  if not (
+    public.current_profile_is_approved()
+    or public.current_profile_role() = 'admin'
+  ) then
+    raise exception 'Bu islem icin yetkin bulunmuyor.';
+  end if;
+
+  select member_id
+  into suggestion_owner_id
+  from public.suggestions
+  where id = suggestion_id_input;
+
+  if suggestion_owner_id is null then
+    raise exception 'Logo yuklenecek oneri bulunamadi.';
+  end if;
+
+  if suggestion_owner_id <> auth.uid() then
+    raise exception 'SVG dosyasini sadece oneriyi ekleyen uye yukleyebilir.';
+  end if;
+
+  insert into public.suggestion_assets (
+    suggestion_id,
+    member_id,
+    storage_path,
+    mime_type
+  )
+  values (
+    suggestion_id_input,
+    auth.uid(),
+    storage_path_input,
+    coalesce(nullif(trim(mime_type_input), ''), 'image/svg+xml')
+  )
+  returning * into asset_row;
+
+  return asset_row;
+end;
+$$;
+
+create or replace function public.remove_suggestion_asset(
+  asset_id_input uuid
+)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  asset_row public.suggestion_assets;
+begin
+  if auth.uid() is null then
+    raise exception 'Gecerli bir oturum bulunamadi.';
+  end if;
+
+  select *
+  into asset_row
+  from public.suggestion_assets
+  where id = asset_id_input;
+
+  if not found then
+    raise exception 'Silinecek SVG kaydi bulunamadi.';
+  end if;
+
+  if asset_row.member_id <> auth.uid() and public.current_profile_role() <> 'admin' then
+    raise exception 'Bu SVG kaydini silme yetkin yok.';
+  end if;
+
+  delete from public.suggestion_assets
+  where id = asset_id_input;
+
+  return asset_row.storage_path;
+end;
+$$;
+
 create or replace function public.enforce_no_self_vote()
 returns trigger
 language plpgsql
@@ -238,10 +364,43 @@ security definer
 set search_path = public
 as $$
 declare
+  latest_log_row public.member_activity_logs;
   log_row public.member_activity_logs;
 begin
   if auth.uid() is null then
     raise exception 'Gecerli bir oturum bulunamadi.';
+  end if;
+
+  select *
+  into latest_log_row
+  from public.member_activity_logs
+  where member_id = auth.uid()
+  order by created_at desc
+  limit 1;
+
+  if not found
+    or latest_log_row.action_type in ('logout', 'session_timeout')
+    or latest_log_row.created_at < now() - interval '30 minutes'
+  then
+    if not found
+      or latest_log_row.action_type <> 'session_timeout'
+      or latest_log_row.created_at < now() - interval '5 minutes'
+    then
+      insert into public.member_activity_logs (
+        member_id,
+        action_type,
+        target_type,
+        details
+      )
+      values (
+        auth.uid(),
+        'session_timeout',
+        'auth',
+        '{}'::jsonb
+      );
+    end if;
+
+    raise exception 'SESSION_TIMEOUT';
   end if;
 
   insert into public.member_activity_logs (
@@ -264,111 +423,69 @@ begin
 end;
 $$;
 
-create or replace function public.begin_current_session()
-returns public.profiles
+create or replace function public.begin_member_session(
+  action_type_input text default 'login_success'
+)
+returns public.member_activity_logs
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  profile_row public.profiles;
+  log_row public.member_activity_logs;
 begin
   if auth.uid() is null then
     raise exception 'Gecerli bir oturum bulunamadi.';
   end if;
 
-  update public.profiles
-  set last_activity_at = now()
-  where id = auth.uid()
-  returning * into profile_row;
-
-  if not found then
-    raise exception 'Aktif uye profili bulunamadi.';
-  end if;
-
-  return profile_row;
-end;
-$$;
-
-create or replace function public.touch_current_session()
-returns public.profiles
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  profile_row public.profiles;
-  recent_timeout_exists boolean;
-begin
-  if auth.uid() is null then
-    raise exception 'Gecerli bir oturum bulunamadi.';
-  end if;
-
-  update public.profiles
-  set last_activity_at = now()
-  where id = auth.uid()
-    and coalesce(last_activity_at >= now() - interval '2 minutes', false)
-  returning * into profile_row;
-
-  if found then
-    return profile_row;
-  end if;
-
-  select exists (
-    select 1
-    from public.member_activity_logs
-    where member_id = auth.uid()
-      and action_type = 'session_timeout'
-      and created_at >= now() - interval '5 minutes'
+  insert into public.member_activity_logs (
+    member_id,
+    action_type,
+    target_type,
+    details
   )
-  into recent_timeout_exists;
+  values (
+    auth.uid(),
+    coalesce(nullif(trim(action_type_input), ''), 'login_success'),
+    'auth',
+    '{}'::jsonb
+  )
+  returning * into log_row;
 
-  if not recent_timeout_exists then
-    insert into public.member_activity_logs (
-      member_id,
-      action_type,
-      target_type,
-      details
-    )
-    values (
-      auth.uid(),
-      'session_timeout',
-      'auth',
-      '{}'::jsonb
-    );
-  end if;
-
-  update public.profiles
-  set last_activity_at = null
-  where id = auth.uid();
-
-  raise exception 'SESSION_TIMEOUT';
+  return log_row;
 end;
 $$;
 
-create or replace function public.end_current_session()
-returns public.profiles
+create or replace function public.end_member_session(
+  action_type_input text default 'logout'
+)
+returns public.member_activity_logs
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  profile_row public.profiles;
+  log_row public.member_activity_logs;
 begin
   if auth.uid() is null then
     raise exception 'Gecerli bir oturum bulunamadi.';
   end if;
 
-  update public.profiles
-  set last_activity_at = null
-  where id = auth.uid()
-  returning * into profile_row;
+  insert into public.member_activity_logs (
+    member_id,
+    action_type,
+    target_type,
+    details
+  )
+  values (
+    auth.uid(),
+    coalesce(nullif(trim(action_type_input), ''), 'logout'),
+    'auth',
+    '{}'::jsonb
+  )
+  returning * into log_row;
 
-  if not found then
-    raise exception 'Aktif uye profili bulunamadi.';
-  end if;
-
-  return profile_row;
+  return log_row;
 end;
 $$;
 
@@ -425,7 +542,6 @@ begin
     display_name,
     role,
     approved,
-    last_activity_at,
     approved_at
   )
   values (
@@ -434,7 +550,6 @@ begin
     coalesce(nullif(trim(display_name_input), ''), normalized_username),
     next_role,
     next_approved,
-    now(),
     case when next_approved then now() else null end
   )
   returning * into profile_row;
@@ -621,11 +736,9 @@ to authenticated
 using (
   (
     public.current_profile_is_approved()
-    and public.current_profile_session_is_active()
   )
   or (
     public.current_profile_role() = 'admin'
-    and public.current_profile_session_is_active()
   )
 );
 
@@ -640,7 +753,6 @@ with check (
     public.current_profile_is_approved()
     or public.current_profile_role() = 'admin'
   )
-  and public.current_profile_session_is_active()
 );
 
 drop policy if exists "owners or admins can delete suggestion assets" on public.suggestion_assets;
@@ -653,7 +765,6 @@ using (
     member_id = auth.uid()
     or public.current_profile_role() = 'admin'
   )
-  and public.current_profile_session_is_active()
 );
 
 drop policy if exists "admins can read member activity logs" on public.member_activity_logs;
@@ -766,7 +877,6 @@ using (
     public.current_profile_is_approved()
     or public.current_profile_role() = 'admin'
   )
-  and public.current_profile_session_is_active()
 );
 
 drop policy if exists "owners can upload suggestion svg objects" on storage.objects;
@@ -780,7 +890,6 @@ with check (
     public.current_profile_is_approved()
     or public.current_profile_role() = 'admin'
   )
-  and public.current_profile_session_is_active()
   and (storage.foldername(name))[1] = auth.uid()::text
 );
 
@@ -795,7 +904,6 @@ using (
     (storage.foldername(name))[1] = auth.uid()::text
     or public.current_profile_role() = 'admin'
   )
-  and public.current_profile_session_is_active()
 );
 
 grant usage on schema public to authenticated;
@@ -809,9 +917,11 @@ grant execute on function public.current_profile_role() to authenticated;
 grant execute on function public.current_profile_is_approved() to authenticated;
 grant execute on function public.current_profile_session_is_active() to authenticated;
 grant execute on function public.enforce_suggestion_asset_rules() to authenticated;
-grant execute on function public.begin_current_session() to authenticated;
-grant execute on function public.touch_current_session() to authenticated;
-grant execute on function public.end_current_session() to authenticated;
+grant execute on function public.get_suggestion_assets(uuid) to authenticated;
+grant execute on function public.insert_suggestion_asset(uuid, text, text) to authenticated;
+grant execute on function public.remove_suggestion_asset(uuid) to authenticated;
+grant execute on function public.begin_member_session(text) to authenticated;
+grant execute on function public.end_member_session(text) to authenticated;
 grant execute on function public.log_member_activity(text, text, text, jsonb) to authenticated;
 grant execute on function public.complete_signup(text) to authenticated;
 grant execute on function public.admin_set_member_approval(uuid, boolean) to authenticated;

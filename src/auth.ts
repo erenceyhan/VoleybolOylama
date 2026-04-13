@@ -23,6 +23,10 @@ export function getAuthErrorMessage(error: unknown) {
   if (error instanceof Error && error.message) {
     const lowered = error.message.toLowerCase();
 
+    if (lowered.includes("session_timeout")) {
+      return "Uzun sure islem yapilmadigi icin tekrar giris yapman gerekiyor.";
+    }
+
     if (lowered.includes("email rate limit exceeded")) {
       return "Supabase kayit sirasinda dogrulama maili gondermeye calisiyor ve email limiti dolmus. Supabase panelinde Confirm email ayarini kapat, sonra tekrar dene.";
     }
@@ -36,6 +40,14 @@ export function getAuthErrorMessage(error: unknown) {
 
   return "Beklenmeyen bir hata olustu.";
 }
+
+export function isSessionTimeoutError(error: unknown) {
+  return (
+    error instanceof Error &&
+    error.message.toLowerCase().includes("session_timeout")
+  );
+}
+
 export function getPasswordRuleText() {
   return "Sifre en az 6 karakter olmali ve en az 2 rakam icermeli.";
 }
