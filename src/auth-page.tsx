@@ -221,8 +221,8 @@ export default function AuthPage() {
               Hesabina gir ve oylamaya katil.
             </h1>
             <p className="mt-3 text-sm leading-7 text-[#5f6d76]">
-              Ilk ekran sade kalsin diye burada sadece giris ve kayit akislarini
-              biraktik. Basarili oturumdan sonra ana panel acilir.
+              Basarili oturumdan sonra ana panel acilir. 
+              Bilgileri görmek icin giris yapiniz.
             </p>
           </div>
           <AccountPanel
