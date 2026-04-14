@@ -1136,15 +1136,6 @@ function App() {
                   onSubmit={(event) => void handleAddSuggestion(event)}
                 />
 
-                <MembersPanel
-                  members={appData.members}
-                  suggestions={appData.suggestions}
-                  remoteEnabled={remoteEnabled}
-                  isAdmin={remoteEnabled && Boolean(isAdmin)}
-                  onSelectMember={(member) => {
-                    void handleMemberSelect(member);
-                  }}
-                />
               </>
             ) : null}
           </div>
@@ -1171,6 +1162,16 @@ function App() {
                 getCurrentMemberVote={getCurrentMemberVote}
                 onSelect={(suggestionId) => {
                   void handleSuggestionSelect(suggestionId);
+                }}
+              />
+
+              <MembersPanel
+                members={appData.members}
+                suggestions={appData.suggestions}
+                remoteEnabled={remoteEnabled}
+                isAdmin={remoteEnabled && Boolean(isAdmin)}
+                onSelectMember={(member) => {
+                  void handleMemberSelect(member);
                 }}
               />
             </div>
