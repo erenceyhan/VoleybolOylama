@@ -147,7 +147,7 @@ export function Field({
   children,
 }: PropsWithChildren<{ label: string }>) {
   return (
-    <label className="grid gap-2 text-sm font-medium text-[#33444d]">
+    <label className="grid gap-2 font-medium text-[#33444d]">
       <span>{label}</span>
       {children}
     </label>
