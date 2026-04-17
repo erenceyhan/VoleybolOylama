@@ -22,6 +22,11 @@ const NAV_ITEMS = [
     description: "Dizilimler ve ileride gelecek mac akislari",
   },
   {
+    href: "/panel/youtube-videolari",
+    title: "YouTube Videolari",
+    description: "Mac videolari, analizler ve egitim akislari",
+  },
+  {
     href: "/panel/uyeler",
     title: "Uyeler",
     description: "Uye takibi ve yonetim ekranlari",
@@ -201,7 +206,15 @@ export function PanelShell({ children }: PropsWithChildren) {
             <Link
               key={item.href}
               href={item.href}
-              onClick={() => {
+              onClick={(event) => {
+                const hasSearchState =
+                  typeof window !== "undefined" && window.location.search.length > 0;
+
+                if (pathname === item.href && hasSearchState) {
+                  event.preventDefault();
+                  void router.replace(item.href);
+                }
+
                 if (mobile) {
                   setMobileMenuOpen(false);
                 }

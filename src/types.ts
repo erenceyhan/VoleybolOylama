@@ -52,6 +52,14 @@ export type MemberActivityLog = {
   createdAt: string;
 };
 
+export type YoutubeVideoEntry = {
+  id: string;
+  videoDate: string;
+  url: string;
+  createdAt: string;
+  createdBy: string;
+};
+
 export type AppData = {
   members: Member[];
   suggestions: Suggestion[];

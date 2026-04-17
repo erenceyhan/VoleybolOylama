@@ -7,6 +7,7 @@ import type {
   MemberActivityLog,
   MemberRole,
   SuggestionAsset,
+  YoutubeVideoEntry,
 } from "./types";
 
 type ProfileRow = {
@@ -66,6 +67,14 @@ type RotationConfigRow = {
   frames: RotationConfigPayload["frames"];
   updated_at: string;
   updated_by: string | null;
+};
+
+type YoutubeVideoEntryRow = {
+  id: string;
+  video_date: string;
+  url: string;
+  created_at: string;
+  created_by: string;
 };
 
 const ASSET_BUCKET = "suggestion-assets";
@@ -207,6 +216,16 @@ function mapMemberActivityLogRow(row: MemberActivityLogRow): MemberActivityLog {
     details:
       row.details && typeof row.details === "object" ? row.details : {},
     createdAt: row.created_at,
+  };
+}
+
+function mapYoutubeVideoEntryRow(row: YoutubeVideoEntryRow): YoutubeVideoEntry {
+  return {
+    id: row.id,
+    videoDate: row.video_date,
+    url: row.url,
+    createdAt: row.created_at,
+    createdBy: row.created_by,
   };
 }
 
@@ -782,6 +801,65 @@ export async function fetchMemberActivityLogs(memberId: string) {
   }
 
   return ((data ?? []) as MemberActivityLogRow[]).map(mapMemberActivityLogRow);
+}
+
+export async function fetchYoutubeVideoEntries() {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const { data, error } = await client
+    .from("youtube_video_entries")
+    .select("id, video_date, url, created_at, created_by")
+    .order("video_date", { ascending: false })
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return ((data ?? []) as YoutubeVideoEntryRow[]).map(mapYoutubeVideoEntryRow);
+}
+
+export async function addYoutubeVideoEntry(videoDate: string, url: string) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+  const {
+    data: { session },
+  } = await client.auth.getSession();
+
+  if (!session?.user) {
+    throw new Error("Video eklemek icin giris yapman gerekiyor.");
+  }
+
+  const { data, error } = await client
+    .from("youtube_video_entries")
+    .insert({
+      video_date: videoDate,
+      url: url.trim(),
+      created_by: session.user.id,
+    })
+    .select("id, video_date, url, created_at, created_by")
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return mapYoutubeVideoEntryRow(data as YoutubeVideoEntryRow);
+}
+
+export async function deleteYoutubeVideoEntry(entryId: string) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const { error } = await client
+    .from("youtube_video_entries")
+    .delete()
+    .eq("id", entryId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
 }
 
 export async function updateMemberApproval(memberId: string, approved: boolean) {
