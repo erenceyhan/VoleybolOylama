@@ -24,6 +24,11 @@ import {
   cx,
 } from "./components/ui";
 
+type YoutubeOEmbedMetadata = {
+  title: string;
+  authorName?: string;
+};
+
 function formatMonthLabel(date: Date) {
   return new Intl.DateTimeFormat("tr-TR", {
     month: "long",
@@ -119,6 +124,30 @@ function getYoutubeHostLabel(value: string) {
   }
 }
 
+async function fetchYoutubeOEmbedMetadata(url: string) {
+  const response = await fetch(
+    `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+  );
+
+  if (!response.ok) {
+    throw new Error("OEMBED_FETCH_FAILED");
+  }
+
+  const data = (await response.json()) as {
+    title?: string;
+    author_name?: string;
+  };
+
+  if (!data.title) {
+    throw new Error("OEMBED_INVALID_RESPONSE");
+  }
+
+  return {
+    title: data.title,
+    authorName: data.author_name,
+  } satisfies YoutubeOEmbedMetadata;
+}
+
 export function YoutubeVideosPage() {
   const router = useRouter();
   const pathname = usePathname();
@@ -132,6 +161,9 @@ export function YoutubeVideosPage() {
   const [notice, setNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [videoUrlInput, setVideoUrlInput] = useState("");
+  const [videoMetadata, setVideoMetadata] = useState<
+    Record<string, YoutubeOEmbedMetadata>
+  >({});
   const [visibleMonth, setVisibleMonth] = useState(() => {
     if (selectedDate) {
       return getMonthStart(new Date(`${selectedDate}T00:00:00`));
@@ -156,6 +188,50 @@ export function YoutubeVideosPage() {
   useEffect(() => {
     void hydrateVideoPage();
   }, [remoteEnabled]);
+
+  useEffect(() => {
+    const urlsToFetch = entries
+      .map((entry) => entry.url)
+      .filter((url, index, array) => array.indexOf(url) === index)
+      .filter((url) => !videoMetadata[url]);
+
+    if (urlsToFetch.length === 0) {
+      return;
+    }
+
+    let isActive = true;
+
+    async function hydrateYoutubeMetadata() {
+      const settledResults = await Promise.allSettled(
+        urlsToFetch.map(async (url) => ({
+          url,
+          metadata: await fetchYoutubeOEmbedMetadata(url),
+        })),
+      );
+
+      if (!isActive) {
+        return;
+      }
+
+      setVideoMetadata((current) => {
+        const next = { ...current };
+
+        settledResults.forEach((result) => {
+          if (result.status === "fulfilled") {
+            next[result.value.url] = result.value.metadata;
+          }
+        });
+
+        return next;
+      });
+    }
+
+    void hydrateYoutubeMetadata();
+
+    return () => {
+      isActive = false;
+    };
+  }, [entries, videoMetadata]);
 
   async function handleSessionTimeout(errorValue: unknown) {
     if (!remoteEnabled || !isSessionTimeoutError(errorValue)) {
@@ -468,10 +544,10 @@ export function YoutubeVideosPage() {
                             Video {index + 1}
                           </span>
                           <strong className="block text-base text-[#182127] sm:text-lg">
-                            {getYoutubeCardTitle(entry.url)}
+                            {videoMetadata[entry.url]?.title ?? getYoutubeCardTitle(entry.url)}
                           </strong>
                           <p className="text-xs font-medium uppercase tracking-[0.12em] text-[#8d6ae8]">
-                            {getYoutubeHostLabel(entry.url)}
+                            {videoMetadata[entry.url]?.authorName ?? getYoutubeHostLabel(entry.url)}
                           </p>
                           <a
                             href={entry.url}
