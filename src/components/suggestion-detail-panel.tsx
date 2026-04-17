@@ -204,10 +204,10 @@ export function SuggestionDetailPanel({
           {canUploadAssets ? (
             <div className="space-y-3">
               <label className="inline-flex cursor-pointer items-center justify-center rounded-2xl border border-[rgba(141,106,232,0.14)] bg-[linear-gradient(135deg,rgba(255,255,255,0.94),rgba(246,241,255,0.92))] px-4 py-3 text-sm font-semibold text-[#182127] transition hover:-translate-y-0.5">
-                SVG yukle
+                Gorsel yukle
                 <input
                   type="file"
-                  accept=".svg,image/svg+xml"
+                  accept=".svg,.png,.jpg,.jpeg,image/svg+xml,image/png,image/jpeg"
                   className="sr-only"
                   disabled={isSubmitting || suggestionAssets.length >= 3}
                   onChange={(event) => {
@@ -221,17 +221,16 @@ export function SuggestionDetailPanel({
               </label>
               <div className="space-y-1 text-sm leading-6 text-[#5f6d76]">
                 <p>
-                  Yalnizca SVG kabul edilir. Her gonderiye en fazla 3 dosya
-                  eklenebilir. Dosya basi sinir 400 KB.
+                  SVG, PNG ve JPG/JPEG kabul edilir. Her gonderiye en fazla 3
+                  dosya eklenebilir. Dosya basi sinir 400 KB.
                 </p>
-                <p>JPG'den SVG'ye ceviri kolay site: https://convertio.co/tr/</p>
-                <p>Renkli SVG icin: https://www.recraft.ai/</p>
+                <p>Renkli logo uretimi icin: https://www.recraft.ai/</p>
               </div>
             </div>
           ) : null}
 
           {assetsLoading ? (
-            <ToneMessage tone="muted">SVG dosyalari yukleniyor...</ToneMessage>
+            <ToneMessage tone="muted">Gorsel dosyalari yukleniyor...</ToneMessage>
           ) : suggestionAssets.length === 0 ? (
             <ToneMessage tone="muted">
               Bu oneri icin henuz amblem ya da logo yuklenmedi.
@@ -251,7 +250,7 @@ export function SuggestionDetailPanel({
                     <div className="flex aspect-square items-center justify-center rounded-[18px] bg-[linear-gradient(160deg,rgba(255,245,250,0.96),rgba(243,250,245,0.92))] p-3">
                       <img
                         src={asset.publicUrl}
-                        alt={`${suggestion.title} logosu`}
+                        alt={`${suggestion.title} gorseli`}
                         className="max-h-full max-w-full object-contain"
                       />
                     </div>

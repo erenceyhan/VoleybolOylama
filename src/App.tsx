@@ -5,11 +5,7 @@ import { useRouter } from "next/navigation";
 import { getAuthErrorMessage, isSessionTimeoutError } from "./auth";
 import { HeroSection } from "./components/hero-section";
 import { LocalToolsPanel } from "./components/local-tools-panel";
-import { MemberActivityPanel } from "./components/member-activity-panel";
-import { MembersPanel } from "./components/members-panel";
 import { ModalShell } from "./components/modal-shell";
-import { PendingMembersPanel } from "./components/account-panel";
-import { SessionPanel } from "./components/session-panel";
 import { SuggestionComposer } from "./components/suggestion-composer";
 import { SuggestionDetailPanel } from "./components/suggestion-detail-panel";
 import { SuggestionListPanel } from "./components/suggestion-list-panel";
@@ -21,15 +17,10 @@ import {
   deleteRemoteSuggestion,
   deleteRemoteSuggestionAsset,
   deleteRemoteVote,
-  fetchMemberActivityLogs,
-  fetchPendingMembers,
   fetchRemoteAppData,
   fetchSuggestionAssetsForSuggestion,
   getRemoteSessionMember,
   recordRemoteActivity,
-  rejectRemoteMember,
-  signOutRemote,
-  updateMemberApproval,
   updateRemoteSuggestionNote,
   uploadRemoteSuggestionAsset,
   upsertRemoteVote,
@@ -49,19 +40,11 @@ import {
   saveSessionMemberId,
 } from "./storage";
 import { hasSupabaseConfig } from "./supabaseClient";
-import type {
-  AppData,
-  Comment,
-  Member,
-  MemberActivityLog,
-  Suggestion,
-  SuggestionAsset,
-} from "./types";
+import type { AppData, Comment, Suggestion, SuggestionAsset } from "./types";
 import {
   clampVote,
   createId,
   getInitialAppData,
-  getMemberSuggestionCount,
   getSuggestionSummary,
 } from "./utils";
 
@@ -82,6 +65,28 @@ const emptySuggestionDraft: SuggestionDraft = {
   title: "",
   note: "",
 };
+
+const ALLOWED_ASSET_TYPES = new Set([
+  "image/svg+xml",
+  "image/png",
+  "image/jpeg",
+]);
+
+function isAllowedAssetFile(file: File) {
+  const fileType = (file.type || "").toLowerCase();
+  const fileName = file.name.toLowerCase();
+
+  if (ALLOWED_ASSET_TYPES.has(fileType)) {
+    return true;
+  }
+
+  return (
+    fileName.endsWith(".svg") ||
+    fileName.endsWith(".png") ||
+    fileName.endsWith(".jpg") ||
+    fileName.endsWith(".jpeg")
+  );
+}
 
 function App() {
   const router = useRouter();
@@ -104,16 +109,7 @@ function App() {
   const [modalAssets, setModalAssets] = useState<SuggestionAsset[]>([]);
   const [isLoadingModalAssets, setIsLoadingModalAssets] = useState(false);
   const [previewAsset, setPreviewAsset] = useState<SuggestionAsset | null>(null);
-  const [selectedMemberForLogs, setSelectedMemberForLogs] = useState<Member | null>(
-    null,
-  );
-  const [memberLogs, setMemberLogs] = useState<MemberActivityLog[]>([]);
-  const [isLoadingMemberLogs, setIsLoadingMemberLogs] = useState(false);
-  const [memberLogsError, setMemberLogsError] = useState("");
-  const [pendingMembers, setPendingMembers] = useState<Member[]>([]);
-  const [statusNotice, setStatusNotice] = useState("");
   const [suggestionError, setSuggestionError] = useState("");
-  const [adminError, setAdminError] = useState("");
   const [isBootingRemote, setIsBootingRemote] = useState(remoteEnabled);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -199,10 +195,6 @@ function App() {
   const currentSelectedVote = selectedSuggestion
     ? getCurrentMemberVote(selectedSuggestion.id)
     : undefined;
-  const localUsageText =
-    currentMember && !remoteEnabled
-      ? `${getMemberSuggestionCount(appData.suggestions, currentMember.id)}/${MAX_SUGGESTIONS_PER_MEMBER} onerini kullandin.`
-      : undefined;
 
   useEffect(() => {
     if (!remoteEnabled || !sessionMemberId || !isPendingApproval) {
@@ -223,10 +215,10 @@ function App() {
       return;
     }
 
-    if (!currentMember) {
+    if (!currentMember && !isPendingApproval) {
       router.replace("/");
     }
-  }, [currentMember, isBootingRemote, remoteEnabled, router]);
+  }, [currentMember, isBootingRemote, isPendingApproval, remoteEnabled, router]);
 
   useEffect(() => {
     if (!selectedSuggestionId && appData.suggestions[0]) {
@@ -299,27 +291,14 @@ function App() {
       return false;
     }
 
-    try {
-      await signOutRemote();
-    } catch {
-      // Sunucu tarafindaki oturum kaydi zaten kapanmis olabilir.
-    }
-
     setSessionMemberId(null);
     setAppData(emptyAppData);
-    setPendingMembers([]);
     setSelectedSuggestionId(null);
     setModalAssets([]);
     setIsLoadingModalAssets(false);
     setIsSuggestionModalOpen(false);
     setPreviewAsset(null);
-    setSelectedMemberForLogs(null);
-    setMemberLogs([]);
-    setIsLoadingMemberLogs(false);
-    setMemberLogsError("");
     setSuggestionError("");
-    setAdminError("");
-    setStatusNotice("");
     clearSessionMemberId();
     if (typeof window !== "undefined") {
       window.sessionStorage.setItem("auth_timeout_notice", "1");
@@ -337,21 +316,24 @@ function App() {
       if (!sessionMember) {
         setSessionMemberId(null);
         setAppData(emptyAppData);
-        setPendingMembers([]);
+        setSelectedSuggestionId(null);
+        return;
+      }
+
+      setSessionMemberId(sessionMember.id);
+
+      if (!sessionMember.approved && sessionMember.role !== "admin") {
+        setAppData({
+          ...emptyAppData,
+          members: [sessionMember],
+        });
         setSelectedSuggestionId(null);
         return;
       }
 
       const nextData = await fetchRemoteAppData();
       setAppData(nextData);
-      setSessionMemberId(sessionMember.id);
       setSelectedSuggestionId((current) => current ?? nextData.suggestions[0]?.id ?? null);
-
-      if (sessionMember.role === "admin") {
-        setPendingMembers(await fetchPendingMembers());
-      } else {
-        setPendingMembers([]);
-      }
     } catch (error) {
       if (await handleSessionTimeout(error)) {
         return;
@@ -370,31 +352,6 @@ function App() {
     }
 
     return true;
-  }
-
-  async function handleLogout() {
-    if (remoteEnabled) {
-      setIsSubmitting(true);
-
-      try {
-        await signOutRemote();
-      } catch (error) {
-        if (await handleSessionTimeout(error)) {
-          return;
-        }
-
-        setSuggestionError(getAuthErrorMessage(error));
-      } finally {
-        setIsSubmitting(false);
-      }
-    }
-
-    setSessionMemberId(null);
-    setAppData(remoteEnabled ? emptyAppData : appData);
-    setPendingMembers([]);
-    setSelectedSuggestionId(null);
-    clearSessionMemberId();
-    router.push("/");
   }
 
   async function handleAddSuggestion(event: FormEvent<HTMLFormElement>) {
@@ -417,10 +374,9 @@ function App() {
       return;
     }
 
-    const suggestionCount = getMemberSuggestionCount(
-      appData.suggestions,
-      currentMember.id,
-    );
+    const suggestionCount = appData.suggestions.filter(
+      (suggestion) => suggestion.memberId === currentMember.id,
+    ).length;
 
     if (suggestionCount >= MAX_SUGGESTIONS_PER_MEMBER) {
       setSuggestionError("Her kisi en fazla 3 oneride bulunabilir.");
@@ -563,10 +519,7 @@ function App() {
       ...current,
       votes: current.votes.filter(
         (vote) =>
-          !(
-            vote.memberId === currentMember.id &&
-            vote.suggestionId === suggestionId
-          ),
+          !(vote.memberId === currentMember.id && vote.suggestionId === suggestionId),
       ),
     }));
   }
@@ -761,78 +714,6 @@ function App() {
     }));
   }
 
-  async function handleApproval(memberId: string, approved: boolean) {
-    setAdminError("");
-    setStatusNotice("");
-    setIsSubmitting(true);
-
-    try {
-      await updateMemberApproval(memberId, approved);
-      await hydrateRemoteState();
-      setStatusNotice(approved ? "Uye onaylandi." : "Uye tekrar beklemeye alindi.");
-    } catch (error) {
-      if (await handleSessionTimeout(error)) {
-        return;
-      }
-
-      setAdminError(getAuthErrorMessage(error));
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  async function handleRejectMember(memberId: string) {
-    const shouldReject = window.confirm(
-      "Bu uyeligi reddedip tum kaydini silmek istiyor musun?",
-    );
-
-    if (!shouldReject) {
-      return;
-    }
-
-    setAdminError("");
-    setStatusNotice("");
-    setIsSubmitting(true);
-
-    try {
-      await rejectRemoteMember(memberId);
-      await hydrateRemoteState();
-      setStatusNotice("Uyelik reddedildi.");
-    } catch (error) {
-      if (await handleSessionTimeout(error)) {
-        return;
-      }
-
-      setAdminError(getAuthErrorMessage(error));
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  async function handleMemberSelect(member: Member) {
-    if (!remoteEnabled || !isAdmin) {
-      return;
-    }
-
-    setSelectedMemberForLogs(member);
-    setMemberLogs([]);
-    setMemberLogsError("");
-    setIsLoadingMemberLogs(true);
-
-    try {
-      const logs = await fetchMemberActivityLogs(member.id);
-      setMemberLogs(logs);
-    } catch (error) {
-      if (await handleSessionTimeout(error)) {
-        return;
-      }
-
-      setMemberLogsError(getAuthErrorMessage(error));
-    } finally {
-      setIsLoadingMemberLogs(false);
-    }
-  }
-
   function handleImport(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
 
@@ -931,39 +812,33 @@ function App() {
 
   async function handleAssetUpload(suggestionId: string, file: File) {
     if (!remoteEnabled) {
-      setSuggestionError("SVG yukleme sadece Supabase modunda aktif.");
+      setSuggestionError("Gorsel yukleme sadece Supabase modunda aktif.");
       return;
     }
 
-    const fileType = (file.type || "").toLowerCase();
-    const fileName = file.name.toLowerCase();
-
-    if (
-      fileType !== "image/svg+xml" &&
-      !fileName.endsWith(".svg")
-    ) {
-      setSuggestionError("Yalnizca SVG dosyasi yukleyebilirsin.");
+    if (!isAllowedAssetFile(file)) {
+      setSuggestionError("Yalnizca SVG, PNG veya JPG/JPEG dosyasi yukleyebilirsin.");
       return;
     }
 
     if (file.size > 400 * 1024) {
-      setSuggestionError("SVG dosyasi 400 KB sinirini asamaz.");
+      setSuggestionError("Gorsel dosyasi 400 KB sinirini asamaz.");
       return;
     }
 
     setIsSubmitting(true);
     setSuggestionError("");
 
-      try {
-        await uploadRemoteSuggestionAsset(suggestionId, file);
-        await hydrateRemoteState();
-        if (selectedSuggestion && selectedSuggestion.id === suggestionId) {
-          const result = await fetchSuggestionAssetsForSuggestion(
-            selectedSuggestion.id,
-            selectedSuggestion.memberId,
-          );
-          setModalAssets(result.assets);
-        }
+    try {
+      await uploadRemoteSuggestionAsset(suggestionId, file);
+      await hydrateRemoteState();
+      if (selectedSuggestion && selectedSuggestion.id === suggestionId) {
+        const result = await fetchSuggestionAssetsForSuggestion(
+          selectedSuggestion.id,
+          selectedSuggestion.memberId,
+        );
+        setModalAssets(result.assets);
+      }
     } catch (error) {
       if (await handleSessionTimeout(error)) {
         return;
@@ -976,7 +851,7 @@ function App() {
   }
 
   async function handleAssetDelete(asset: SuggestionAsset) {
-    const shouldDelete = window.confirm("Bu SVG dosyasini silmek istiyor musun?");
+    const shouldDelete = window.confirm("Bu gorsel dosyasini silmek istiyor musun?");
 
     if (!shouldDelete) {
       return;
@@ -1042,7 +917,7 @@ function App() {
     }
   }
 
-  async function handleAssetPreview(asset: SuggestionAsset) {
+  function handleAssetPreview(asset: SuggestionAsset) {
     setPreviewAsset(asset);
   }
 
@@ -1097,86 +972,47 @@ function App() {
           />
         ) : null}
 
-        <section className="grid gap-6 xl:grid-cols-[380px_minmax(0,1fr)] xl:items-start">
-          <div className="grid gap-6">
-            <SessionPanel
-              currentMember={currentMember}
-              remoteEnabled={remoteEnabled}
-              isAdmin={Boolean(isAdmin)}
-              isPendingApproval={isPendingApproval}
-              isBooting={isBootingRemote}
-              isSubmitting={isSubmitting}
-              localUsageText={localUsageText}
-              onLogout={() => void handleLogout()}
+        {pendingOnlyMode ? (
+          <Panel>
+            <EmptyState
+              title="Onay bekleniyor."
+              description="Admin onayi gelince oneriler, yorumlar ve puanlama ekrani otomatik olarak acilacak."
             />
-
-            {isAdmin && remoteEnabled ? (
-              <PendingMembersPanel
-                members={pendingMembers}
-                adminError={adminError}
-                authNotice={statusNotice}
-                isSubmitting={isSubmitting}
-                onApprove={(memberId) => void handleApproval(memberId, true)}
-                onReject={(memberId) => void handleRejectMember(memberId)}
-              />
-            ) : null}
-
-            {!pendingOnlyMode ? (
-              <>
-                <SuggestionComposer
-                  remoteEnabled={remoteEnabled}
-                  canParticipate={canParticipate}
-                  isSubmitting={isSubmitting}
-                  draft={suggestionDraft}
-                  error={suggestionError}
-                  maxSuggestionsPerMember={MAX_SUGGESTIONS_PER_MEMBER}
-                  onChange={(field, value) =>
-                    setSuggestionDraft((current) => ({ ...current, [field]: value }))
-                  }
-                  onSubmit={(event) => void handleAddSuggestion(event)}
-                />
-
-              </>
-            ) : null}
-          </div>
-
-          {pendingOnlyMode ? (
-            <Panel>
-              <EmptyState
-                title="Onay bekleniyor."
-                description="Admin onayi gelince oneriler, yorumlar ve puanlama ekrani otomatik olarak acilacak."
-              />
-            </Panel>
-          ) : (
+          </Panel>
+        ) : (
+          <section className="grid gap-6 xl:grid-cols-[380px_minmax(0,1fr)] xl:items-start">
             <div className="grid gap-6">
-              <SuggestionListPanel
-                suggestions={orderedSuggestions}
-                votes={appData.votes}
+              <SuggestionComposer
                 remoteEnabled={remoteEnabled}
-                currentMemberId={currentMember?.id ?? null}
-                isPendingApproval={isPendingApproval}
-                selectedSuggestionId={
-                  isSuggestionModalOpen ? selectedSuggestion?.id ?? null : null
+                canParticipate={canParticipate}
+                isSubmitting={isSubmitting}
+                draft={suggestionDraft}
+                error={suggestionError}
+                maxSuggestionsPerMember={MAX_SUGGESTIONS_PER_MEMBER}
+                onChange={(field, value) =>
+                  setSuggestionDraft((current) => ({ ...current, [field]: value }))
                 }
-                getMemberLabel={getMemberLabel}
-                getCurrentMemberVote={getCurrentMemberVote}
-                onSelect={(suggestionId) => {
-                  void handleSuggestionSelect(suggestionId);
-                }}
-              />
-
-              <MembersPanel
-                members={appData.members}
-                suggestions={appData.suggestions}
-                remoteEnabled={remoteEnabled}
-                isAdmin={remoteEnabled && Boolean(isAdmin)}
-                onSelectMember={(member) => {
-                  void handleMemberSelect(member);
-                }}
+                onSubmit={(event) => void handleAddSuggestion(event)}
               />
             </div>
-          )}
-        </section>
+
+            <SuggestionListPanel
+              suggestions={orderedSuggestions}
+              votes={appData.votes}
+              remoteEnabled={remoteEnabled}
+              currentMemberId={currentMember?.id ?? null}
+              isPendingApproval={isPendingApproval}
+              selectedSuggestionId={
+                isSuggestionModalOpen ? selectedSuggestion?.id ?? null : null
+              }
+              getMemberLabel={getMemberLabel}
+              getCurrentMemberVote={getCurrentMemberVote}
+              onSelect={(suggestionId) => {
+                void handleSuggestionSelect(suggestionId);
+              }}
+            />
+          </section>
+        )}
       </main>
 
       {isSuggestionModalOpen && selectedSuggestion ? (
@@ -1217,7 +1053,7 @@ function App() {
             onUploadAsset={(suggestionId, file) => void handleAssetUpload(suggestionId, file)}
             onDeleteAsset={(asset) => void handleAssetDelete(asset)}
             onPreviewAsset={(asset) => {
-              void handleAssetPreview(asset);
+              handleAssetPreview(asset);
             }}
             onStartEdit={startSuggestionNoteEdit}
             onCancelEdit={cancelSuggestionNoteEdit}
@@ -1240,38 +1076,17 @@ function App() {
 
       {previewAsset ? (
         <ModalShell
-          title="SVG onizleme"
+          title="Gorsel onizleme"
           onClose={() => setPreviewAsset(null)}
           className="sm:max-w-4xl"
         >
           <div className="flex min-h-[40vh] items-center justify-center rounded-[28px] border border-[rgba(141,106,232,0.12)] bg-[radial-gradient(circle_at_top,rgba(217,106,167,0.12),transparent_48%),radial-gradient(circle_at_bottom,rgba(98,180,131,0.1),transparent_42%),linear-gradient(180deg,rgba(255,248,252,0.98),rgba(246,241,255,0.95))] p-6">
             <img
               src={previewAsset.publicUrl}
-              alt="SVG onizleme"
+              alt="Gorsel onizleme"
               className="max-h-[68vh] max-w-full object-contain"
             />
           </div>
-        </ModalShell>
-      ) : null}
-
-      {selectedMemberForLogs ? (
-        <ModalShell
-          title={`@${selectedMemberForLogs.username ?? selectedMemberForLogs.name}`}
-          onClose={() => {
-            setSelectedMemberForLogs(null);
-            setMemberLogs([]);
-            setIsLoadingMemberLogs(false);
-            setMemberLogsError("");
-          }}
-          className="sm:max-w-4xl"
-        >
-          <MemberActivityPanel
-            member={selectedMemberForLogs}
-            suggestions={appData.suggestions}
-            logs={memberLogs}
-            isLoading={isLoadingMemberLogs}
-            error={memberLogsError}
-          />
         </ModalShell>
       ) : null}
     </div>

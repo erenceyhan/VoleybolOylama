@@ -15,9 +15,9 @@ const ACTION_LABELS: Record<string, string> = {
   vote_delete: "Oyunu geri aldi",
   comment_create: "Yorum yapti",
   comment_delete: "Yorum sildi",
-  asset_upload: "SVG yukledi",
-  asset_delete: "SVG sildi",
-  asset_view: "SVG onizleme acti",
+  asset_upload: "Gorsel yukledi",
+  asset_delete: "Gorsel sildi",
+  asset_view: "Gorsel onizleme acti",
   member_approval_update: "Uyelik durumunu guncelledi",
   member_reject: "Uyeyi reddetti",
 };

@@ -55,7 +55,7 @@ create table if not exists public.suggestion_assets (
   suggestion_id uuid not null references public.suggestions (id) on delete cascade,
   member_id uuid not null references public.profiles (id) on delete cascade,
   storage_path text not null unique,
-  mime_type text not null default 'image/svg+xml' check (mime_type = 'image/svg+xml'),
+  mime_type text not null default 'image/svg+xml' check (mime_type in ('image/svg+xml', 'image/png', 'image/jpeg')),
   created_at timestamptz not null default now()
 );
 
@@ -67,6 +67,14 @@ create table if not exists public.member_activity_logs (
   target_id text,
   details jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
+);
+
+create table if not exists public.rotation_configs (
+  id text primary key default 'default',
+  zone_positions jsonb not null default '{}'::jsonb,
+  frames jsonb not null default '[]'::jsonb,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references public.profiles (id) on delete set null
 );
 
 create index if not exists member_activity_logs_member_id_created_at_idx
@@ -84,12 +92,12 @@ values (
   'suggestion-assets',
   true,
   409600,
-  array['image/svg+xml']
+  array['image/svg+xml', 'image/png', 'image/jpeg']
 )
 on conflict (id) do update
 set public = true,
     file_size_limit = 409600,
-    allowed_mime_types = array['image/svg+xml'];
+    allowed_mime_types = array['image/svg+xml', 'image/png', 'image/jpeg'];
 
 create or replace function public.current_profile_role()
 returns text
@@ -178,7 +186,7 @@ begin
   end if;
 
   if new.member_id <> suggestion_owner_id then
-    raise exception 'SVG dosyasini sadece oneriyi ekleyen uye yukleyebilir.';
+    raise exception 'Gorsel dosyasini sadece oneriyi ekleyen uye yukleyebilir.';
   end if;
 
   if tg_op = 'INSERT' then
@@ -188,7 +196,7 @@ begin
     where suggestion_id = new.suggestion_id;
 
     if asset_count >= 3 then
-      raise exception 'Her oneri icin en fazla 3 SVG yuklenebilir.';
+      raise exception 'Her oneri icin en fazla 3 gorsel yuklenebilir.';
     end if;
   end if;
 
@@ -265,7 +273,7 @@ begin
   end if;
 
   if suggestion_owner_id <> auth.uid() then
-    raise exception 'SVG dosyasini sadece oneriyi ekleyen uye yukleyebilir.';
+    raise exception 'Gorsel dosyasini sadece oneriyi ekleyen uye yukleyebilir.';
   end if;
 
   insert into public.suggestion_assets (
@@ -307,11 +315,11 @@ begin
   where id = asset_id_input;
 
   if not found then
-    raise exception 'Silinecek SVG kaydi bulunamadi.';
+    raise exception 'Silinecek gorsel kaydi bulunamadi.';
   end if;
 
   if asset_row.member_id <> auth.uid() and public.current_profile_role() <> 'admin' then
-    raise exception 'Bu SVG kaydini silme yetkin yok.';
+    raise exception 'Bu gorsel kaydini silme yetkin yok.';
   end if;
 
   delete from public.suggestion_assets
@@ -649,6 +657,7 @@ alter table public.profiles enable row level security;
 alter table public.suggestions enable row level security;
 alter table public.suggestion_assets enable row level security;
 alter table public.member_activity_logs enable row level security;
+alter table public.rotation_configs enable row level security;
 alter table public.votes enable row level security;
 alter table public.comments enable row level security;
 
@@ -784,6 +793,46 @@ for insert
 to authenticated
 with check (member_id = auth.uid() and public.current_profile_session_is_active());
 
+drop policy if exists "approved users can read rotation configs" on public.rotation_configs;
+create policy "approved users can read rotation configs"
+on public.rotation_configs
+for select
+to authenticated
+using (
+  (
+    public.current_profile_is_approved()
+    and public.current_profile_session_is_active()
+  )
+  or (
+    public.current_profile_role() = 'admin'
+    and public.current_profile_session_is_active()
+  )
+);
+
+drop policy if exists "admins can insert rotation configs" on public.rotation_configs;
+create policy "admins can insert rotation configs"
+on public.rotation_configs
+for insert
+to authenticated
+with check (
+  public.current_profile_role() = 'admin'
+  and public.current_profile_session_is_active()
+);
+
+drop policy if exists "admins can update rotation configs" on public.rotation_configs;
+create policy "admins can update rotation configs"
+on public.rotation_configs
+for update
+to authenticated
+using (
+  public.current_profile_role() = 'admin'
+  and public.current_profile_session_is_active()
+)
+with check (
+  public.current_profile_role() = 'admin'
+  and public.current_profile_session_is_active()
+);
+
 drop policy if exists "approved users can read votes" on public.votes;
 create policy "approved users can read votes"
 on public.votes
@@ -911,6 +960,7 @@ grant select, update on public.profiles to authenticated;
 grant select, insert, update, delete on public.suggestions to authenticated;
 grant select, insert, delete on public.suggestion_assets to authenticated;
 grant select, insert on public.member_activity_logs to authenticated;
+grant select, insert, update on public.rotation_configs to authenticated;
 grant select, insert, update, delete on public.votes to authenticated;
 grant select, insert, delete on public.comments to authenticated;
 grant execute on function public.current_profile_role() to authenticated;

@@ -1,4 +1,5 @@
 import { getVirtualEmailForUsername, normalizeUsername } from "./auth";
+import type { RotationConfigPayload } from "./rotations/types";
 import { supabase } from "./supabaseClient";
 import type {
   AppData,
@@ -58,7 +59,50 @@ type MemberActivityLogRow = {
   created_at: string;
 };
 
+type RotationConfigRow = {
+  id: string;
+  base_start_order: RotationConfigPayload["baseStartOrder"];
+  zone_positions: RotationConfigPayload["zonePositions"];
+  frames: RotationConfigPayload["frames"];
+  updated_at: string;
+  updated_by: string | null;
+};
+
 const ASSET_BUCKET = "suggestion-assets";
+const DEFAULT_ASSET_MIME_TYPE = "image/svg+xml";
+
+function getAssetMimeType(file: File) {
+  const fileType = (file.type || "").toLowerCase();
+  const fileName = file.name.toLowerCase();
+
+  if (fileType === "image/png" || fileName.endsWith(".png")) {
+    return "image/png";
+  }
+
+  if (
+    fileType === "image/jpeg" ||
+    fileName.endsWith(".jpg") ||
+    fileName.endsWith(".jpeg")
+  ) {
+    return "image/jpeg";
+  }
+
+  return DEFAULT_ASSET_MIME_TYPE;
+}
+
+function getAssetExtension(mimeType: string, fileName: string) {
+  const normalizedName = fileName.toLowerCase();
+
+  if (mimeType === "image/png") {
+    return "png";
+  }
+
+  if (mimeType === "image/jpeg") {
+    return normalizedName.endsWith(".jpeg") ? "jpeg" : "jpg";
+  }
+
+  return "svg";
+}
 
 export type SuggestionAssetDebug = {
   projectHost: string;
@@ -589,19 +633,21 @@ export async function uploadRemoteSuggestionAsset(
   } = await client.auth.getSession();
 
   if (!session?.user) {
-    throw new Error("SVG yuklemek icin giris yapman gerekiyor.");
+    throw new Error("Gorsel yuklemek icin giris yapman gerekiyor.");
   }
 
+  const mimeType = getAssetMimeType(file);
   const assetId =
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
       : `${Date.now()}`;
-  const storagePath = `${session.user.id}/${suggestionId}/${assetId}.svg`;
+  const extension = getAssetExtension(mimeType, file.name);
+  const storagePath = `${session.user.id}/${suggestionId}/${assetId}.${extension}`;
 
   const { error: uploadError } = await client.storage
     .from(ASSET_BUCKET)
     .upload(storagePath, file, {
-      contentType: "image/svg+xml",
+      contentType: mimeType,
       upsert: false,
     });
 
@@ -612,7 +658,7 @@ export async function uploadRemoteSuggestionAsset(
   const { data, error } = await client.rpc("insert_suggestion_asset", {
     suggestion_id_input: suggestionId,
     storage_path_input: storagePath,
-    mime_type_input: "image/svg+xml",
+    mime_type_input: mimeType,
   });
 
   if (error) {
@@ -653,6 +699,66 @@ export async function fetchPendingMembers() {
   }
 
   return (data as ProfileRow[]).map(mapProfileRow);
+}
+
+export async function fetchRemoteRotationConfig() {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const { data, error } = await client
+    .from("rotation_configs")
+    .select("id, base_start_order, zone_positions, frames, updated_at, updated_by")
+    .eq("id", "default")
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  const row = data as RotationConfigRow;
+
+  return {
+    baseStartOrder: row.base_start_order,
+    zonePositions: row.zone_positions,
+    frames: row.frames,
+    updatedAt: row.updated_at,
+    updatedBy: row.updated_by,
+  } satisfies RotationConfigPayload;
+}
+
+export async function saveRemoteRotationConfig(payload: RotationConfigPayload) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const {
+    data: { session },
+  } = await client.auth.getSession();
+
+  if (!session?.user) {
+    throw new Error("Rotasyonlari kaydetmek icin giris yapman gerekiyor.");
+  }
+
+  const { error } = await client.from("rotation_configs").upsert(
+    {
+      id: "default",
+      base_start_order: payload.baseStartOrder,
+      zone_positions: payload.zonePositions,
+      frames: payload.frames,
+      updated_at: new Date().toISOString(),
+      updated_by: session.user.id,
+    },
+    {
+      onConflict: "id",
+    },
+  );
+
+  if (error) {
+    throw new Error(error.message);
+  }
 }
 
 export async function fetchMemberActivityLogs(memberId: string) {
