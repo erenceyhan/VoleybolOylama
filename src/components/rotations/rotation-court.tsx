@@ -326,8 +326,8 @@ export function RotationCourt({
             className="absolute -translate-x-1/2 -translate-y-1/2 transition-all duration-[950ms] ease-[cubic-bezier(0.22,1,0.36,1)]"
             style={toStyle(activePoint)}
           >
-            <div className="mb-2 flex justify-center">
-              <span className="rounded-full bg-[rgba(9,26,33,0.7)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-[rgba(255,255,255,0.82)] shadow-[0_10px_20px_rgba(9,26,33,0.18)] sm:px-2.5 sm:text-[11px] sm:tracking-[0.14em]">
+            <div className="pointer-events-none absolute bottom-full left-1/2 mb-2 -translate-x-1/2">
+              <span className="block whitespace-nowrap rounded-full bg-[rgba(9,26,33,0.7)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-[rgba(255,255,255,0.82)] shadow-[0_10px_20px_rgba(9,26,33,0.18)] sm:px-2.5 sm:text-[11px] sm:tracking-[0.14em]">
                 {player.name}
               </span>
             </div>
