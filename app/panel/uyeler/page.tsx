@@ -1,5 +1,10 @@
-import { MembersPage } from "../../../src/members-page";
+import { LegacyRouteRedirect } from "../../../src/components/legacy-route-redirect";
 
 export default function MembersRoutePage() {
-  return <MembersPage />;
+  return (
+    <LegacyRouteRedirect
+      href="/uyeler"
+      message="Uyeler modulunun yeni adresine yonlendiriliyorsun."
+    />
+  );
 }

@@ -283,7 +283,7 @@ export function YoutubeVideosPage() {
   }
 
   function closeDateDetail() {
-    router.replace("/panel/youtube-videolari");
+    router.replace("/youtube-videolari");
   }
 
   async function handleAddEntry() {

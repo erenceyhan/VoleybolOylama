@@ -2,6 +2,18 @@ import { getVirtualEmailForUsername, normalizeUsername } from "./auth";
 import type { RotationConfigPayload } from "./rotations/types";
 import { supabase } from "./supabaseClient";
 import type {
+  TrainingPlanEvent,
+  TrainingPlanEventInput,
+  TrainingPlanResponse,
+  TrainingPlanResponseInput,
+  TrainingSchoolLink,
+  TrainingPlanSettings,
+} from "./training-plan/types";
+import {
+  buildTrainingPlanEventTitle,
+  normalizeTrainingPlanLink,
+} from "./training-plan/utils";
+import type {
   AppData,
   Member,
   MemberActivityLog,
@@ -77,6 +89,48 @@ type YoutubeVideoEntryRow = {
   created_by: string;
 };
 
+type TrainingPlanEventRow = {
+  id: string;
+  title: string;
+  description: string | null;
+  match_link: string | null;
+  match_source: "amator" | "voleyboloyna" | null;
+  event_type: TrainingPlanEvent["eventType"];
+  created_by: string;
+  possible_days: string[] | null;
+  possible_hours: string[] | null;
+  is_locked: boolean;
+  locked_day: string | null;
+  locked_hour: string | null;
+  created_at: string;
+};
+
+type TrainingPlanSettingsRow = {
+  id: string;
+  voleyboloyna_link: string | null;
+  amator_match_program_link?: string | null;
+  training_school_links?: unknown;
+  updated_at: string | null;
+  updated_by: string | null;
+};
+
+type TrainingPlanMemberProfileRow = {
+  display_name: string;
+  username: string | null;
+};
+
+type TrainingPlanResponseRow = {
+  id: string;
+  event_id: string;
+  member_id: string;
+  status: TrainingPlanResponse["status"];
+  selected_days: string[] | null;
+  selected_hours: string[] | null;
+  note: string | null;
+  updated_at: string;
+  member?: TrainingPlanMemberProfileRow | TrainingPlanMemberProfileRow[] | null;
+};
+
 const ASSET_BUCKET = "suggestion-assets";
 const DEFAULT_ASSET_MIME_TYPE = "image/svg+xml";
 
@@ -131,6 +185,34 @@ function requireSupabase() {
   }
 
   return supabase;
+}
+
+function isMissingColumnError(
+  error: { message?: string } | null | undefined,
+  columnName: string,
+) {
+  const message = error?.message?.toLowerCase() ?? "";
+  const normalizedColumnName = columnName.toLowerCase();
+
+  return (
+    message.includes(normalizedColumnName) &&
+    (message.includes("schema cache") || message.includes("does not exist"))
+  );
+}
+
+function isMissingTableError(
+  error: { message?: string } | null | undefined,
+  tableName: string,
+) {
+  const message = error?.message?.toLowerCase() ?? "";
+  const normalizedTableName = tableName.toLowerCase();
+
+  return (
+    message.includes(normalizedTableName) &&
+    (message.includes("does not exist") ||
+      message.includes("schema cache") ||
+      message.includes("relation"))
+  );
 }
 
 async function beginCurrentSession(
@@ -216,6 +298,116 @@ function mapMemberActivityLogRow(row: MemberActivityLogRow): MemberActivityLog {
     details:
       row.details && typeof row.details === "object" ? row.details : {},
     createdAt: row.created_at,
+  };
+}
+
+function mapTrainingPlanEventRow(row: TrainingPlanEventRow): TrainingPlanEvent {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description ?? "",
+    matchLink: row.match_link ?? "",
+    matchSource:
+      row.event_type === "match"
+        ? row.match_source === "voleyboloyna"
+          ? "voleyboloyna"
+          : "amator"
+        : null,
+    eventType: row.event_type,
+    createdBy: row.created_by,
+    possibleDays: row.possible_days ?? [],
+    possibleHours: row.possible_hours ?? [],
+    isLocked: row.is_locked,
+    lockedDay: row.locked_day,
+    lockedHour: row.locked_hour,
+    createdAt: row.created_at,
+  };
+}
+
+function getDefaultTrainingPlanSettings(): TrainingPlanSettings {
+  return {
+    voleyboloynaLink: "",
+    amatorMatchProgramLink: "",
+    schoolLinks: [],
+    updatedAt: null,
+    updatedBy: null,
+  };
+}
+
+function mapTrainingSchoolLinks(rawValue: unknown): TrainingSchoolLink[] {
+  if (!Array.isArray(rawValue)) {
+    return [];
+  }
+
+  return rawValue
+    .map((item, index) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+
+      const rawLink = item as Record<string, unknown>;
+      const name = String(rawLink.name ?? "").trim();
+      const price = String(rawLink.price ?? "").trim();
+      const websiteUrl = normalizeTrainingPlanLink(
+        String(rawLink.websiteUrl ?? rawLink.website_url ?? "").trim(),
+      );
+      const address = String(rawLink.address ?? "").trim();
+
+      if (!name) {
+        return null;
+      }
+
+      return {
+        id: String(rawLink.id ?? `school-${index + 1}`),
+        name,
+        price,
+        websiteUrl,
+        address,
+      } satisfies TrainingSchoolLink;
+    })
+    .filter((entry): entry is TrainingSchoolLink => Boolean(entry));
+}
+
+function normalizeTrainingSchoolLinks(
+  links: TrainingSchoolLink[],
+): TrainingSchoolLink[] {
+  return links
+    .map((link, index) => {
+      const name = link.name.trim();
+
+      if (!name) {
+        return null;
+      }
+
+      return {
+        id: link.id?.trim() || `school-${Date.now()}-${index + 1}`,
+        name,
+        price: link.price.trim(),
+        websiteUrl: normalizeTrainingPlanLink(link.websiteUrl),
+        address: link.address.trim(),
+      } satisfies TrainingSchoolLink;
+    })
+    .filter((entry): entry is TrainingSchoolLink => Boolean(entry));
+}
+
+function mapTrainingPlanResponseRow(
+  row: TrainingPlanResponseRow,
+): TrainingPlanResponse {
+  const memberProfile = Array.isArray(row.member)
+    ? row.member[0] ?? null
+    : row.member ?? null;
+
+  return {
+    id: row.id,
+    eventId: row.event_id,
+    memberId: row.member_id,
+    memberDisplayName: memberProfile?.display_name ?? "Uye",
+    memberUsername: memberProfile?.username ?? null,
+    status: row.status,
+    selectedDays: row.selected_days ?? [],
+    selectedHours: row.selected_hours ?? [],
+    note: row.note ?? "",
+    updatedAt: row.updated_at,
   };
 }
 
@@ -720,6 +912,210 @@ export async function fetchPendingMembers() {
   return (data as ProfileRow[]).map(mapProfileRow);
 }
 
+export async function fetchTrainingPlanEligibleMembers() {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+  const { data, error } = await client
+    .from("profiles")
+    .select("id, username, display_name, role, approved")
+    .or("approved.eq.true,role.eq.admin")
+    .order("username");
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data as ProfileRow[]).map(mapProfileRow);
+}
+
+export async function fetchTrainingPlanSettings() {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const primaryResult = await client
+    .from("training_plan_settings")
+    .select(
+      "id, voleyboloyna_link, amator_match_program_link, training_school_links, updated_at, updated_by",
+    )
+    .eq("id", "default")
+    .maybeSingle();
+  let data = primaryResult.data as TrainingPlanSettingsRow | null;
+  let error = primaryResult.error;
+
+  if (error && isMissingColumnError(error, "training_school_links")) {
+    const fallbackResult = await client
+      .from("training_plan_settings")
+      .select(
+        "id, voleyboloyna_link, amator_match_program_link, updated_at, updated_by",
+      )
+      .eq("id", "default")
+      .maybeSingle();
+
+    data = fallbackResult.data as TrainingPlanSettingsRow | null;
+    error = fallbackResult.error;
+  }
+
+  if (error && isMissingColumnError(error, "amator_match_program_link")) {
+    const fallbackResult = await client
+      .from("training_plan_settings")
+      .select("id, voleyboloyna_link, updated_at, updated_by")
+      .eq("id", "default")
+      .maybeSingle();
+
+    data = fallbackResult.data as TrainingPlanSettingsRow | null;
+    error = fallbackResult.error;
+  }
+
+  if (error) {
+    if (isMissingTableError(error, "training_plan_settings")) {
+      return getDefaultTrainingPlanSettings();
+    }
+
+    throw new Error(error.message);
+  }
+
+  if (!data) {
+    return getDefaultTrainingPlanSettings();
+  }
+
+  const row = data as TrainingPlanSettingsRow;
+
+  return {
+    voleyboloynaLink: row.voleyboloyna_link ?? "",
+    amatorMatchProgramLink: row.amator_match_program_link ?? "",
+    schoolLinks: mapTrainingSchoolLinks(row.training_school_links),
+    updatedAt: row.updated_at,
+    updatedBy: row.updated_by,
+  } satisfies TrainingPlanSettings;
+}
+
+export async function saveTrainingPlanSettings(input: {
+  voleyboloynaLink: string;
+  amatorMatchProgramLink: string;
+  schoolLinks: TrainingSchoolLink[];
+}) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+  const {
+    data: { session },
+  } = await client.auth.getSession();
+
+  if (!session?.user) {
+    throw new Error("Ayarlari kaydetmek icin giris yapman gerekiyor.");
+  }
+
+  const normalizedVoleyboloynaLink = normalizeTrainingPlanLink(
+    input.voleyboloynaLink,
+  );
+  const normalizedAmatorMatchProgramLink = normalizeTrainingPlanLink(
+    input.amatorMatchProgramLink,
+  );
+  const normalizedSchoolLinks = normalizeTrainingSchoolLinks(input.schoolLinks);
+  const updatedAt = new Date().toISOString();
+
+  let { error } = await client.from("training_plan_settings").upsert(
+    {
+      id: "default",
+      voleyboloyna_link: normalizedVoleyboloynaLink || null,
+      amator_match_program_link: normalizedAmatorMatchProgramLink || null,
+      training_school_links: normalizedSchoolLinks,
+      updated_at: updatedAt,
+      updated_by: session.user.id,
+    },
+    {
+      onConflict: "id",
+    },
+  );
+
+  if (error) {
+    if (isMissingTableError(error, "training_plan_settings")) {
+      throw new Error(
+        "Mac programi ayarlarini kaydetmek icin once training_plan schema guncellemesini bir kez calistirmamiz gerekiyor.",
+      );
+    }
+
+    if (isMissingColumnError(error, "training_school_links")) {
+      if (normalizedSchoolLinks.length > 0) {
+        throw new Error(
+          "Okul baglantilarini kaydetmek icin once training_plan schema guncellemesini bir kez calistirmamiz gerekiyor.",
+        );
+      }
+
+      const fallbackResult = await client.from("training_plan_settings").upsert(
+        {
+          id: "default",
+          voleyboloyna_link: normalizedVoleyboloynaLink || null,
+          amator_match_program_link: normalizedAmatorMatchProgramLink || null,
+          updated_at: updatedAt,
+          updated_by: session.user.id,
+        },
+        {
+          onConflict: "id",
+        },
+      );
+
+      error = fallbackResult.error;
+    }
+
+    if (isMissingColumnError(error, "amator_match_program_link")) {
+      if (normalizedAmatorMatchProgramLink) {
+        throw new Error(
+          "Amator mac programini kaydetmek icin once training_plan schema guncellemesini bir kez calistirmamiz gerekiyor.",
+        );
+      }
+
+      const fallbackResult = await client.from("training_plan_settings").upsert(
+        {
+          id: "default",
+          voleyboloyna_link: normalizedVoleyboloynaLink || null,
+          training_school_links: normalizedSchoolLinks,
+          updated_at: updatedAt,
+          updated_by: session.user.id,
+        },
+        {
+          onConflict: "id",
+        },
+      );
+
+      error = fallbackResult.error;
+    }
+
+    if (error && isMissingColumnError(error, "training_school_links")) {
+      if (normalizedSchoolLinks.length > 0) {
+        throw new Error(
+          "Okul baglantilarini kaydetmek icin once training_plan schema guncellemesini bir kez calistirmamiz gerekiyor.",
+        );
+      }
+
+      const fallbackResult = await client.from("training_plan_settings").upsert(
+        {
+          id: "default",
+          voleyboloyna_link: normalizedVoleyboloynaLink || null,
+          updated_at: updatedAt,
+          updated_by: session.user.id,
+        },
+        {
+          onConflict: "id",
+        },
+      );
+
+      error = fallbackResult.error;
+    }
+  }
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return {
+    voleyboloynaLink: normalizedVoleyboloynaLink,
+    amatorMatchProgramLink: normalizedAmatorMatchProgramLink,
+    schoolLinks: normalizedSchoolLinks,
+    updatedAt,
+    updatedBy: session.user.id,
+  } satisfies TrainingPlanSettings;
+}
+
 export async function fetchRemoteRotationConfig() {
   const client = requireSupabase();
   await ensureActiveSession(client);
@@ -789,6 +1185,7 @@ export async function fetchMemberActivityLogs(memberId: string) {
     .eq("member_id", memberId)
     .in("action_type", [
       "login_success",
+      "panel_view",
       "suggestion_open",
       "logout",
       "session_timeout",
@@ -801,6 +1198,236 @@ export async function fetchMemberActivityLogs(memberId: string) {
   }
 
   return ((data ?? []) as MemberActivityLogRow[]).map(mapMemberActivityLogRow);
+}
+
+export async function fetchTrainingPlanEvents() {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const primaryResult = await client
+    .from("training_plan_events")
+    .select(
+      "id, title, description, match_link, match_source, event_type, created_by, possible_days, possible_hours, is_locked, locked_day, locked_hour, created_at",
+    )
+    .order("created_at", { ascending: false });
+  let data = primaryResult.data as TrainingPlanEventRow[] | null;
+  let error = primaryResult.error;
+
+  if (
+    error &&
+    (isMissingColumnError(error, "match_link") ||
+      isMissingColumnError(error, "match_source"))
+  ) {
+    const fallbackResult = await client
+      .from("training_plan_events")
+      .select(
+        "id, title, description, event_type, created_by, possible_days, possible_hours, is_locked, locked_day, locked_hour, created_at",
+      )
+      .order("created_at", { ascending: false });
+
+    data = fallbackResult.data as TrainingPlanEventRow[] | null;
+    error = fallbackResult.error;
+  }
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return ((data ?? []) as TrainingPlanEventRow[]).map(mapTrainingPlanEventRow);
+}
+
+export async function createTrainingPlanEvent(input: TrainingPlanEventInput) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+  const {
+    data: { session },
+  } = await client.auth.getSession();
+
+  if (!session?.user) {
+    throw new Error("Etkinlik olusturmak icin giris yapman gerekiyor.");
+  }
+
+  const normalizedTitle =
+    input.title.trim() || buildTrainingPlanEventTitle(input.eventType);
+  const normalizedMatchLink =
+    input.eventType === "match" && input.matchSource === "amator"
+      ? normalizeTrainingPlanLink(input.matchLink)
+      : "";
+
+  const insertPayload = {
+    title: normalizedTitle,
+    description: input.description.trim(),
+    match_link: normalizedMatchLink || null,
+    match_source: input.eventType === "match" ? input.matchSource : null,
+    event_type: input.eventType,
+    created_by: session.user.id,
+    possible_days: input.isLocked ? [] : input.possibleDays,
+    possible_hours: input.isLocked ? [] : input.possibleHours,
+    is_locked: input.isLocked,
+    locked_day: input.isLocked ? input.lockedDay : null,
+    locked_hour: input.isLocked ? input.lockedHour : null,
+  };
+
+  const primaryInsertResult = await client
+    .from("training_plan_events")
+    .insert(insertPayload)
+    .select(
+      "id, title, description, match_link, match_source, event_type, created_by, possible_days, possible_hours, is_locked, locked_day, locked_hour, created_at",
+    )
+    .single();
+  let data = primaryInsertResult.data as TrainingPlanEventRow | null;
+  let error = primaryInsertResult.error;
+
+  if (
+    error &&
+    (isMissingColumnError(error, "match_link") ||
+      isMissingColumnError(error, "match_source"))
+  ) {
+    if (normalizedMatchLink || input.matchSource === "voleyboloyna") {
+      throw new Error(
+        "Mac kaynaklarini kaydetmek icin once training_plan schema guncellemesini bir kez calistirmamiz gerekiyor.",
+      );
+    }
+
+    const fallbackPayload = {
+      title: normalizedTitle,
+      description: input.description.trim(),
+      event_type: input.eventType,
+      created_by: session.user.id,
+      possible_days: input.isLocked ? [] : input.possibleDays,
+      possible_hours: input.isLocked ? [] : input.possibleHours,
+      is_locked: input.isLocked,
+      locked_day: input.isLocked ? input.lockedDay : null,
+      locked_hour: input.isLocked ? input.lockedHour : null,
+    };
+
+    const fallbackResult = await client
+      .from("training_plan_events")
+      .insert(fallbackPayload)
+      .select(
+        "id, title, description, event_type, created_by, possible_days, possible_hours, is_locked, locked_day, locked_hour, created_at",
+      )
+      .single();
+
+    data = fallbackResult.data as TrainingPlanEventRow | null;
+    error = fallbackResult.error;
+  }
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const event = mapTrainingPlanEventRow(data as TrainingPlanEventRow);
+
+  const { error: responseError } = await client.from("training_plan_responses").upsert(
+    {
+      event_id: event.id,
+      member_id: session.user.id,
+      status: "yes",
+      selected_days: event.isLocked ? [] : event.possibleDays,
+      selected_hours: event.isLocked ? [] : event.possibleHours,
+      note: "",
+      updated_at: new Date().toISOString(),
+    },
+    {
+      onConflict: "event_id,member_id",
+    },
+  );
+
+  if (responseError) {
+    throw new Error(responseError.message);
+  }
+
+  return event;
+}
+
+export async function fetchTrainingPlanResponses(eventId: string) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const { data, error } = await client
+    .from("training_plan_responses")
+    .select(
+      "id, event_id, member_id, status, selected_days, selected_hours, note, updated_at, member:profiles!training_plan_responses_member_id_fkey(display_name, username)",
+    )
+    .eq("event_id", eventId)
+    .order("updated_at", { ascending: false });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return ((data ?? []) as TrainingPlanResponseRow[]).map(
+    mapTrainingPlanResponseRow,
+  );
+}
+
+export async function upsertTrainingPlanResponse(
+  input: TrainingPlanResponseInput,
+) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+  const {
+    data: { session },
+  } = await client.auth.getSession();
+
+  if (!session?.user) {
+    throw new Error("Oy gondermek icin giris yapman gerekiyor.");
+  }
+
+  const payload = {
+    event_id: input.eventId,
+    member_id: session.user.id,
+    status: input.status,
+    selected_days: input.selectedDays,
+    selected_hours: input.selectedHours,
+    note: input.note.trim(),
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await client.from("training_plan_responses").upsert(payload, {
+    onConflict: "event_id,member_id",
+  });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+export async function lockTrainingPlanEvent(
+  eventId: string,
+  day: string,
+  hour: string,
+) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const { error } = await client
+    .from("training_plan_events")
+    .update({
+      is_locked: true,
+      locked_day: day,
+      locked_hour: hour,
+    })
+    .eq("id", eventId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+export async function deleteTrainingPlanEvent(eventId: string) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const { error } = await client
+    .from("training_plan_events")
+    .delete()
+    .eq("id", eventId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
 }
 
 export async function fetchYoutubeVideoEntries() {

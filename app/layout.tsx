@@ -8,9 +8,28 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Takim Ismi Oylamasi",
+  title: "Voleybol Takim Islemleri",
   description:
-    "Voleybol takim ismini birlikte belirlemek icin hizli ve mobil uyumlu oylama uygulamasi.",
+    "Voleybol takim islemleri icin isim oylama, rotasyon, antrenman plani, video ve uye yonetimini tek yerde toplayan panel.",
+  metadataBase: new URL("https://erenceyhan.github.io"),
+  alternates: {
+    canonical: "/",
+  },
+  openGraph: {
+    title: "Voleybol Takim Islemleri",
+    description:
+      "Voleybol takim islemleri icin isim oylama, rotasyon, antrenman plani, video ve uye yonetimini tek yerde toplayan panel.",
+    url: "https://erenceyhan.github.io",
+    siteName: "Voleybol Takim Islemleri",
+    type: "website",
+    locale: "tr_TR",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Voleybol Takim Islemleri",
+    description:
+      "Voleybol takim islemleri icin isim oylama, rotasyon, antrenman plani, video ve uye yonetimini tek yerde toplayan panel.",
+  },
 };
 
 export default function RootLayout({

@@ -10,7 +10,11 @@ import {
   isValidUsername,
 } from "./auth";
 import { AccountPanel } from "./components/account-panel";
-import { getRemoteSessionMember, signInWithUsernamePassword, signUpPendingMember } from "./remote";
+import {
+  getRemoteSessionMember,
+  signInWithUsernamePassword,
+  signUpPendingMember,
+} from "./remote";
 import { initialAppData } from "./seed";
 import { loadSessionMemberId, saveSessionMemberId } from "./storage";
 import { hasSupabaseConfig } from "./supabaseClient";
@@ -62,13 +66,18 @@ export default function AuthPage() {
   const [isBootingRemote, setIsBootingRemote] = useState(remoteEnabled);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [sessionTimeoutMessage, setSessionTimeoutMessage] = useState("");
+  const redirectPath = getSafeRedirectPath(
+    typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search).get("next"),
+  );
 
   useEffect(() => {
     if (!remoteEnabled) {
       setIsBootingRemote(false);
 
       if (loadSessionMemberId()) {
-        router.replace("/panel");
+        router.replace(redirectPath);
       }
 
       return;
@@ -81,7 +90,7 @@ export default function AuthPage() {
         const sessionMember = await getRemoteSessionMember();
 
         if (sessionMember && isMounted) {
-          router.replace("/panel");
+          router.replace(redirectPath);
           return;
         }
       } catch {
@@ -98,7 +107,7 @@ export default function AuthPage() {
     return () => {
       isMounted = false;
     };
-  }, [remoteEnabled, router]);
+  }, [redirectPath, remoteEnabled, router]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -137,7 +146,10 @@ export default function AuthPage() {
       (member) => member.id === localLoginDraft.memberId,
     );
 
-    if (!targetMember || targetMember.accessCode !== localLoginDraft.accessCode.trim()) {
+    if (
+      !targetMember ||
+      targetMember.accessCode !== localLoginDraft.accessCode.trim()
+    ) {
       setLoginError("Isim ya da giris kodu hatali.");
       return;
     }
@@ -146,7 +158,7 @@ export default function AuthPage() {
     setLoginError("");
     setAuthNotice("");
     setLocalLoginDraft((current) => ({ ...current, accessCode: "" }));
-    router.push("/panel");
+    router.push(redirectPath);
   }
 
   async function handleRemoteLoginSubmit(event: FormEvent<HTMLFormElement>) {
@@ -170,7 +182,7 @@ export default function AuthPage() {
         remoteLoginDraft.password,
       );
       setRemoteLoginDraft(emptyRemoteLoginDraft);
-      router.push("/panel");
+      router.push(redirectPath);
     } catch (error) {
       setLoginError(getAuthErrorMessage(error));
     } finally {
@@ -201,7 +213,7 @@ export default function AuthPage() {
           ? "Admin hesabi acildi. Yonlendiriliyorsun..."
           : "Kayit tamamlandi. Onay durumunu panelde gorebilirsin.",
       );
-      router.push("/panel");
+      router.push(redirectPath);
     } catch (error) {
       setLoginError(getAuthErrorMessage(error));
     } finally {
@@ -215,14 +227,14 @@ export default function AuthPage() {
         <div className="mx-auto w-full">
           <div className="mb-5 text-center">
             <span className="inline-flex rounded-full border border-[rgba(141,106,232,0.12)] bg-[linear-gradient(135deg,rgba(255,238,247,0.92),rgba(246,241,255,0.92))] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-[#8d6ae8]">
-              Takim adi secimi
+              Voleybol takim islemleri
             </span>
             <h1 className="mt-4 text-3xl font-bold tracking-[-0.05em] text-[#182127]">
-              Hesabina gir ve oylamaya katil.
+              Hesabina gir ve takim paneline gec.
             </h1>
             <p className="mt-3 text-sm leading-7 text-[#5f6d76]">
-              Basarili oturumdan sonra ana panel acilir. 
-              Bilgileri görmek icin giris yapiniz.
+              Giris sonrasinda isim oylama, rotasyonlar, antrenman plani,
+              videolar ve uye yonetimi tek panelde acilir.
             </p>
           </div>
           <AccountPanel
@@ -260,4 +272,16 @@ export default function AuthPage() {
       </main>
     </div>
   );
+}
+
+function getSafeRedirectPath(nextPath: string | null) {
+  if (!nextPath) {
+    return "/voleybol-isim-oyla";
+  }
+
+  if (!nextPath.startsWith("/") || nextPath.startsWith("//")) {
+    return "/voleybol-isim-oyla";
+  }
+
+  return nextPath;
 }

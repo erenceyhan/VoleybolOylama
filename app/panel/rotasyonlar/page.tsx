@@ -1,5 +1,10 @@
-import { RotationsPageView } from "../../../src/rotations-page";
+import { LegacyRouteRedirect } from "../../../src/components/legacy-route-redirect";
 
 export default function RotationsPage() {
-  return <RotationsPageView />;
+  return (
+    <LegacyRouteRedirect
+      href="/rotasyonlar"
+      message="Rotasyonlar modulunun yeni adresine yonlendiriliyorsun."
+    />
+  );
 }

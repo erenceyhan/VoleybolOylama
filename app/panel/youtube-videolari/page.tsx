@@ -1,5 +1,10 @@
-import { YoutubeVideosPage } from "../../../src/youtube-videos-page";
+import { LegacyRouteRedirect } from "../../../src/components/legacy-route-redirect";
 
 export default function YoutubeVideosRoutePage() {
-  return <YoutubeVideosPage />;
+  return (
+    <LegacyRouteRedirect
+      href="/youtube-videolari"
+      message="YouTube videolari modulunun yeni adresine yonlendiriliyorsun."
+    />
+  );
 }

@@ -4,7 +4,11 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { PropsWithChildren, useEffect, useMemo, useRef, useState } from "react";
 import { isSessionTimeoutError } from "../auth";
-import { getRemoteSessionMember, signOutRemote } from "../remote";
+import {
+  getRemoteSessionMember,
+  recordRemoteActivity,
+  signOutRemote,
+} from "../remote";
 import { clearSessionMemberId, loadSessionMemberId } from "../storage";
 import { hasSupabaseConfig } from "../supabaseClient";
 import type { Member } from "../types";
@@ -12,22 +16,27 @@ import { GhostButton, Panel, PrimaryButton, ToneMessage, cx } from "./ui";
 
 const NAV_ITEMS = [
   {
-    href: "/panel",
+    href: "/voleybol-isim-oyla",
     title: "Voleybol Isim Oyla",
     description: "Mevcut isim oylama ve yorum akisi",
   },
   {
-    href: "/panel/rotasyonlar",
+    href: "/rotasyonlar",
     title: "Rotasyonlar",
     description: "Dizilimler ve ileride gelecek mac akislari",
   },
   {
-    href: "/panel/youtube-videolari",
+    href: "/antrenman-plani",
+    title: "Antrenman Plani",
+    description: "Antrenman akislari, drill bloklari ve gunluk planlar",
+  },
+  {
+    href: "/youtube-videolari",
     title: "YouTube Videolari",
     description: "Mac videolari, analizler ve egitim akislari",
   },
   {
-    href: "/panel/uyeler",
+    href: "/uyeler",
     title: "Uyeler",
     description: "Uye takibi ve yonetim ekranlari",
   },
@@ -45,6 +54,8 @@ export function PanelShell({ children }: PropsWithChildren) {
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(true);
   const hasHandledInitialMobilePath = useRef(false);
+  const lastLoggedPanelKey = useRef<string | null>(null);
+  const primaryModuleHref = NAV_ITEMS[0]?.href ?? "/voleybol-isim-oyla";
 
   function isMobileViewport() {
     if (typeof window === "undefined") {
@@ -156,12 +167,47 @@ export function PanelShell({ children }: PropsWithChildren) {
   const currentNavTitle = useMemo(() => {
     return (
       NAV_ITEMS.find((item) =>
-        item.href === "/panel"
-          ? pathname === "/panel"
-          : pathname?.startsWith(item.href),
+        pathname === item.href || pathname?.startsWith(`${item.href}/`),
       )?.title ?? "Panel"
     );
   }, [pathname]);
+
+  useEffect(() => {
+    if (!remoteEnabled || isBooting || !currentMember) {
+      return;
+    }
+
+    const panelLogKey = `${currentMember.id}:${pathname}`;
+
+    if (lastLoggedPanelKey.current === panelLogKey) {
+      return;
+    }
+
+    lastLoggedPanelKey.current = panelLogKey;
+    let isActive = true;
+
+    void (async () => {
+      try {
+        await recordRemoteActivity("panel_view", "panel", pathname, {
+          title: currentNavTitle,
+          path: pathname,
+        });
+      } catch (error) {
+        if (!isActive) {
+          return;
+        }
+
+        if (typeof window !== "undefined" && isSessionTimeoutError(error)) {
+          window.sessionStorage.setItem("auth_timeout_notice", "1");
+          router.replace("/?reason=session-timeout");
+        }
+      }
+    })();
+
+    return () => {
+      isActive = false;
+    };
+  }, [currentMember, currentNavTitle, isBooting, pathname, remoteEnabled, router]);
 
   async function handleLogout() {
     setIsSigningOut(true);
@@ -181,26 +227,26 @@ export function PanelShell({ children }: PropsWithChildren) {
 
   const menuContent = (mobile = false) => (
     <>
-      <div className="space-y-3">
-        <span className="inline-flex rounded-full border border-[rgba(141,106,232,0.12)] bg-[linear-gradient(135deg,rgba(255,238,247,0.92),rgba(246,241,255,0.92))] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-[#8d6ae8]">
-          Menu
-        </span>
-        <div>
-          <h2 className="text-2xl font-bold tracking-[-0.04em] text-[#182127]">
-            {currentNavTitle}
-          </h2>
-          <p className="mt-2 text-sm leading-6 text-[#5f6d76]">
-            Proje buyudukce yeni moduller bu menuden ayrilacak.
-          </p>
+      {!mobile ? (
+        <div className="space-y-3">
+          <span className="inline-flex rounded-full border border-[rgba(141,106,232,0.12)] bg-[linear-gradient(135deg,rgba(255,238,247,0.92),rgba(246,241,255,0.92))] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-[#8d6ae8]">
+            Menu
+          </span>
+          <div>
+            <h2 className="text-2xl font-bold tracking-[-0.04em] text-[#182127]">
+              {currentNavTitle}
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-[#5f6d76]">
+              Proje buyudukce yeni moduller bu menuden ayrilacak.
+            </p>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       <nav className="grid gap-2">
         {NAV_ITEMS.map((item) => {
           const isActive =
-            item.href === "/panel"
-              ? pathname === "/panel"
-              : pathname?.startsWith(item.href);
+            pathname === item.href || pathname?.startsWith(`${item.href}/`);
 
           return (
             <Link
@@ -255,7 +301,7 @@ export function PanelShell({ children }: PropsWithChildren) {
       ) : null}
 
       <div className={cx("pt-2", !mobile && "mt-auto")}>
-        {pathname === "/panel" ? (
+        {pathname === primaryModuleHref ? (
           <PrimaryButton
             type="button"
             className="w-full"
@@ -361,7 +407,7 @@ export function PanelShell({ children }: PropsWithChildren) {
                 onClick={() => setMobileMenuOpen(false)}
                 aria-label="Menuyu kapat"
               >
-                ×
+                x
               </button>
             </div>
             {menuContent(true)}

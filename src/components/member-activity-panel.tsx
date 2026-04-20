@@ -4,6 +4,7 @@ import { EmptyState, SoftCard, ToneMessage } from "./ui";
 
 const ACTION_LABELS: Record<string, string> = {
   login_success: "Giris yapti",
+  panel_view: "Sayfayi acti",
   register_success: "Kayit oldu",
   logout: "Cikis yapti",
   session_timeout: "Oturum zaman asimina ugradi",

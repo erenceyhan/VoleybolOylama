@@ -28,13 +28,13 @@ export function HeroSection({
             </span>
           ) : null}
           <div className="space-y-4">
-            <h1 className="max-w-[11ch] text-4xl font-bold leading-[0.92] tracking-[-0.06em] sm:text-5xl lg:text-7xl">
-              Voleybol takim adini birlikte secin.
+            <h1 className="max-w-[13ch] text-4xl font-bold leading-[0.92] tracking-[-0.06em] sm:text-5xl lg:text-7xl">
+              Voleybol takim islemlerini tek panelden yonetin.
             </h1>
             <p className="max-w-2xl text-base leading-8 text-white/78 sm:text-lg">
-              Herkes en fazla 3 isim onerisi girebilir, tum oneriler
-              puanlanabilir, yorumlanabilir ve oy dagilimi tek ekranda takip
-              edilebilir.
+              Isim oylama, rotasyonlar, antrenman plani, video arsivi ve uye
+              takibi ayni yapida bulusuyor. Takimla ilgili akislari tek yerden
+              takip edip yonetebiliriz.
             </p>
           </div>
         </div>

@@ -1,10 +1,9 @@
 import type { ReactNode } from "react";
-import { PanelShell } from "../../src/components/panel-shell";
 
-export default function PanelLayout({
+export default function LegacyPanelLayout({
   children,
 }: {
   children: ReactNode;
 }) {
-  return <PanelShell>{children}</PanelShell>;
+  return <>{children}</>;
 }
