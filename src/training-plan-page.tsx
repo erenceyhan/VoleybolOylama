@@ -89,6 +89,42 @@ function formatDateTime(value: string) {
   }).format(new Date(value));
 }
 
+function resolveEventDateTime(
+  day: string | null | undefined,
+  hour: string | null | undefined,
+  referenceDate: string,
+) {
+  if (!day || !hour) {
+    return null;
+  }
+
+  const baseDate = getTrainingPlanNextDate(day, new Date(referenceDate));
+
+  if (!baseDate) {
+    return null;
+  }
+
+  const [rawHour, rawMinute = "00"] = hour.split(":");
+  const resolvedDate = new Date(baseDate);
+  resolvedDate.setHours(Number(rawHour) || 0, Number(rawMinute) || 0, 0, 0);
+  return resolvedDate;
+}
+
+function resolveEventCutoffDateTime(event: TrainingPlanEvent) {
+  if (event.isLocked) {
+    return resolveEventDateTime(event.lockedDay, event.lockedHour, event.createdAt);
+  }
+
+  if (event.eventType !== "training") {
+    return null;
+  }
+
+  const lastDay = sortTrainingPlanDays(event.possibleDays).at(-1) ?? null;
+  const lastHour = sortTrainingPlanHours(event.possibleHours).at(-1) ?? null;
+
+  return resolveEventDateTime(lastDay, lastHour, event.createdAt);
+}
+
 function redirectToTimeout(router: ReturnType<typeof useRouter>) {
   if (typeof window !== "undefined") {
     window.sessionStorage.setItem("auth_timeout_notice", "1");
@@ -119,6 +155,7 @@ export function TrainingPlanPage() {
   const [isEventDetailOpen, setIsEventDetailOpen] = useState(false);
   const [isSlotBreakdownOpen, setIsSlotBreakdownOpen] = useState(false);
   const [isTrainingSchoolsOpen, setIsTrainingSchoolsOpen] = useState(false);
+  const [isPastEventsOpen, setIsPastEventsOpen] = useState(false);
   const [isEditingVoleyboloynaLink, setIsEditingVoleyboloynaLink] =
     useState(false);
   const [isEditingAmatorMatchProgramLink, setIsEditingAmatorMatchProgramLink] =
@@ -252,6 +289,18 @@ export function TrainingPlanPage() {
   }, [responses, selectedEvent, sortedPossibleDays, sortedPossibleHours]);
 
   const isAdmin = currentMember?.role === "admin";
+  const pastEvents = useMemo(() => {
+    const now = new Date();
+
+    return events.filter((event) => {
+      const cutoffDate = resolveEventCutoffDateTime(event);
+      return Boolean(cutoffDate && cutoffDate.getTime() < now.getTime());
+    });
+  }, [events]);
+  const activeEvents = useMemo(() => {
+    const pastEventIds = new Set(pastEvents.map((event) => event.id));
+    return events.filter((event) => !pastEventIds.has(event.id));
+  }, [events, pastEvents]);
   const canCreateEvents = Boolean(
     currentMember && (currentMember.role === "admin" || currentMember.approved),
   );
@@ -361,7 +410,20 @@ export function TrainingPlanPage() {
             return currentSelectedId;
           }
 
-          return nextEvents[0]?.id ?? "";
+          const nextPastEventIds = new Set(
+            nextEvents
+              .filter((event) => {
+                const cutoffDate = resolveEventCutoffDateTime(event);
+                return Boolean(
+                  cutoffDate && cutoffDate.getTime() < new Date().getTime(),
+                );
+              })
+              .map((event) => event.id),
+          );
+          const nextActiveEvent =
+            nextEvents.find((event) => !nextPastEventIds.has(event.id)) ?? null;
+
+          return nextActiveEvent?.id ?? nextEvents[0]?.id ?? "";
         });
       } catch (error) {
         if (!isActive) {
@@ -445,9 +507,9 @@ export function TrainingPlanPage() {
     }
 
     if (!selectedEventId || !events.some((event) => event.id === selectedEventId)) {
-      setSelectedEventId(events[0]?.id ?? "");
+      setSelectedEventId(activeEvents[0]?.id ?? events[0]?.id ?? "");
     }
-  }, [events, selectedEventId]);
+  }, [activeEvents, events, selectedEventId]);
 
   useEffect(() => {
     if (!requestedEventId || !events.some((event) => event.id === requestedEventId)) {
@@ -1077,19 +1139,19 @@ export function TrainingPlanPage() {
         <MetricCard
           label="Toplam etkinlik"
           mobileLabel="Toplam"
-          value={String(events.length)}
+          value={String(activeEvents.length)}
           accent="from-[#d96aa7] to-[#f08bbd]"
         />
         <MetricCard
           label="Acik oylama"
           mobileLabel="Acik"
-          value={String(events.filter((event) => !event.isLocked).length)}
+          value={String(activeEvents.filter((event) => !event.isLocked).length)}
           accent="from-[#8d6ae8] to-[#b48cff]"
         />
         <MetricCard
           label="Kilitli plan"
           mobileLabel="Kilitli"
-          value={String(events.filter((event) => event.isLocked).length)}
+          value={String(activeEvents.filter((event) => event.isLocked).length)}
           accent="from-[#58b783] to-[#8ad8a8]"
         />
       </div>
@@ -1466,9 +1528,9 @@ export function TrainingPlanPage() {
             description="Bu listedeki bir kayda tikladigimizda detay popup olarak acilir."
           />
 
-          {events.length ? (
+          {activeEvents.length ? (
             <div className="grid gap-3">
-              {events.map((event) => {
+              {activeEvents.map((event) => {
                 const isSelected = event.id === selectedEventId;
 
                 return (
@@ -1518,6 +1580,79 @@ export function TrainingPlanPage() {
           )}
         </Panel>
       </div>
+
+      <Panel className="space-y-5">
+        <button
+          type="button"
+          onClick={() => setIsPastEventsOpen((current) => !current)}
+          className="flex w-full items-start justify-between gap-4 text-left"
+        >
+          <SectionHeader
+            title="Gecmis etkinlikler"
+            description={
+              isPastEventsOpen
+                ? "Liste acik. Tekrar tiklayinca geri kapanir."
+                : "Tiklayinca asagi acilir. Detaylar yine popup olarak acilir."
+            }
+          />
+          <span className="mt-1 inline-flex h-9 min-w-9 items-center justify-center rounded-full border border-[rgba(141,106,232,0.14)] bg-white/80 px-3 text-sm font-semibold text-[#8d6ae8]">
+            {isPastEventsOpen ? "-" : "+"}
+          </span>
+        </button>
+
+        {isPastEventsOpen ? (
+          pastEvents.length ? (
+            <div className="grid gap-3">
+            {pastEvents.map((event) => {
+              const isSelected = event.id === selectedEventId;
+
+              return (
+                <button
+                  key={event.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedEventId(event.id);
+                    setIsEventDetailOpen(true);
+                  }}
+                  className={cx(
+                    "rounded-[26px] border p-4 text-left transition duration-200",
+                    isSelected
+                      ? "border-[rgba(141,106,232,0.18)] bg-[linear-gradient(145deg,rgba(255,241,248,0.96),rgba(246,241,255,0.92),rgba(242,251,245,0.9))] shadow-[0_18px_38px_rgba(141,106,232,0.12)]"
+                      : "border-[rgba(141,106,232,0.1)] bg-white/68 hover:-translate-y-0.5 hover:bg-white/84",
+                  )}
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="space-y-2">
+                      <EventTypeBadge
+                        label={getTrainingPlanEventTypeLabel(event.eventType)}
+                        locked={event.isLocked}
+                      />
+                      <strong className="block text-base text-[#182127]">
+                        {event.title}
+                      </strong>
+                    </div>
+                    <span className="text-xs font-medium text-[#6d7a83]">
+                      {formatDateTime(event.createdAt)}
+                    </span>
+                  </div>
+
+                  <p className="mt-3 text-sm leading-6 text-[#5f6d76]">
+                    {event.isLocked && event.lockedDay && event.lockedHour
+                      ? `${event.lockedDay} / ${formatTrainingPlanHourRange(event.lockedHour)}`
+                      : `${event.possibleDays.length} gun, ${event.possibleHours.length} saat araliginda oylaniyor.`}
+                  </p>
+                </button>
+              );
+            })}
+            </div>
+          ) : (
+            <EmptyState
+              title="Henuz gecmis etkinlik yok."
+              description="Tarihi gecen etkinlikler burada gorunecek."
+            />
+          )
+        ) : null}
+      </Panel>
 
       {selectedEvent && isEventDetailOpen ? (
         <ModalShell
