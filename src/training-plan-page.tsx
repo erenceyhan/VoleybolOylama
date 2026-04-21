@@ -1104,7 +1104,7 @@ export function TrainingPlanPage() {
       )}
 
       <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
-        <div className="grid gap-6">
+        <div className="order-2 grid gap-6 xl:order-1">
           <Panel className="space-y-5">
             <SectionHeader
               title="Antrenman plani"
@@ -1460,7 +1460,7 @@ export function TrainingPlanPage() {
 
         </div>
 
-        <Panel className="space-y-5">
+        <Panel className="order-1 space-y-5 xl:order-2">
           <SectionHeader
             title="Etkinlikler"
             description="Bu listedeki bir kayda tikladigimizda detay popup olarak acilir."
