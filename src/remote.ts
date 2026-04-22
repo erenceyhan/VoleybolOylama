@@ -23,6 +23,7 @@ import type {
   MemberActivityLog,
   MemberRole,
   SuggestionAsset,
+  YoutubeVideoDayMember,
   YoutubeVideoEntry,
 } from "./types";
 
@@ -89,6 +90,14 @@ type YoutubeVideoEntryRow = {
   id: string;
   video_date: string;
   url: string;
+  created_at: string;
+  created_by: string;
+};
+
+type YoutubeVideoDayMemberRow = {
+  id: string;
+  video_date: string;
+  member_id: string;
   created_at: string;
   created_by: string;
 };
@@ -444,6 +453,18 @@ function mapYoutubeVideoEntryRow(row: YoutubeVideoEntryRow): YoutubeVideoEntry {
     id: row.id,
     videoDate: row.video_date,
     url: row.url,
+    createdAt: row.created_at,
+    createdBy: row.created_by,
+  };
+}
+
+function mapYoutubeVideoDayMemberRow(
+  row: YoutubeVideoDayMemberRow,
+): YoutubeVideoDayMember {
+  return {
+    id: row.id,
+    videoDate: row.video_date,
+    memberId: row.member_id,
     createdAt: row.created_at,
     createdBy: row.created_by,
   };
@@ -1649,6 +1670,86 @@ export async function deleteYoutubeVideoEntry(entryId: string) {
     .eq("id", entryId);
 
   if (error) {
+    throw new Error(error.message);
+  }
+}
+
+export async function fetchYoutubeVideoDayMembers() {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const { data, error } = await client
+    .from("youtube_video_day_members")
+    .select("id, video_date, member_id, created_at, created_by")
+    .order("video_date", { ascending: false })
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    if (isMissingTableError(error, "youtube_video_day_members")) {
+      return [];
+    }
+
+    throw new Error(error.message);
+  }
+
+  return ((data ?? []) as YoutubeVideoDayMemberRow[]).map(
+    mapYoutubeVideoDayMemberRow,
+  );
+}
+
+export async function addYoutubeVideoDayMember(
+  videoDate: string,
+  memberId: string,
+) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+  const {
+    data: { session },
+  } = await client.auth.getSession();
+
+  if (!session?.user) {
+    throw new Error("Kisi eklemek icin giris yapman gerekiyor.");
+  }
+
+  const { data, error } = await client
+    .from("youtube_video_day_members")
+    .insert({
+      video_date: videoDate,
+      member_id: memberId,
+      created_by: session.user.id,
+    })
+    .select("id, video_date, member_id, created_at, created_by")
+    .single();
+
+  if (error) {
+    if (isMissingTableError(error, "youtube_video_day_members")) {
+      throw new Error(
+        "Gun bazli kisi ekleme ozelligi icin youtube_video_day_members tablosu henuz kurulmamis.",
+      );
+    }
+
+    throw new Error(error.message);
+  }
+
+  return mapYoutubeVideoDayMemberRow(data as YoutubeVideoDayMemberRow);
+}
+
+export async function deleteYoutubeVideoDayMember(entryId: string) {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const { error } = await client
+    .from("youtube_video_day_members")
+    .delete()
+    .eq("id", entryId);
+
+  if (error) {
+    if (isMissingTableError(error, "youtube_video_day_members")) {
+      throw new Error(
+        "Gun bazli kisi ekleme ozelligi icin youtube_video_day_members tablosu henuz kurulmamis.",
+      );
+    }
+
     throw new Error(error.message);
   }
 }

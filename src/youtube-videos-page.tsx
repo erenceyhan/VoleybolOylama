@@ -4,14 +4,18 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { getAuthErrorMessage, isSessionTimeoutError } from "./auth";
 import {
+  addYoutubeVideoDayMember,
   addYoutubeVideoEntry,
+  deleteYoutubeVideoDayMember,
   deleteYoutubeVideoEntry,
+  fetchTrainingPlanEligibleMembers,
+  fetchYoutubeVideoDayMembers,
   fetchYoutubeVideoEntries,
   getRemoteSessionMember,
 } from "./remote";
 import { clearSessionMemberId } from "./storage";
 import { hasSupabaseConfig } from "./supabaseClient";
-import type { Member, YoutubeVideoEntry } from "./types";
+import type { Member, YoutubeVideoDayMember, YoutubeVideoEntry } from "./types";
 import {
   DangerButton,
   EmptyState,
@@ -155,12 +159,19 @@ export function YoutubeVideosPage() {
   const remoteEnabled = hasSupabaseConfig;
   const selectedDate = searchParams.get("date");
   const [entries, setEntries] = useState<YoutubeVideoEntry[]>([]);
+  const [dayMembers, setDayMembers] = useState<YoutubeVideoDayMember[]>([]);
+  const [eligibleMembers, setEligibleMembers] = useState<Member[]>([]);
   const [currentMember, setCurrentMember] = useState<Member | null>(null);
   const [isBooting, setIsBooting] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [videoUrlInput, setVideoUrlInput] = useState("");
+  const [isDayMembersEditorOpen, setIsDayMembersEditorOpen] = useState(false);
+  const [pendingMemberIds, setPendingMemberIds] = useState<string[]>([]);
+  const [pendingRemovedMemberIds, setPendingRemovedMemberIds] = useState<string[]>(
+    [],
+  );
   const [videoMetadata, setVideoMetadata] = useState<
     Record<string, YoutubeOEmbedMetadata>
   >({});
@@ -264,7 +275,15 @@ export function YoutubeVideosPage() {
       }
 
       setCurrentMember(sessionMember);
-      setEntries(await fetchYoutubeVideoEntries());
+      const [nextEntries, nextDayMembers, nextEligibleMembers] = await Promise.all([
+        fetchYoutubeVideoEntries(),
+        fetchYoutubeVideoDayMembers(),
+        fetchTrainingPlanEligibleMembers(),
+      ]);
+
+      setEntries(nextEntries);
+      setDayMembers(nextDayMembers);
+      setEligibleMembers(nextEligibleMembers);
     } catch (errorValue) {
       if (await handleSessionTimeout(errorValue)) {
         return;
@@ -354,6 +373,83 @@ export function YoutubeVideosPage() {
     }
   }
 
+  async function handleSaveDayMembers() {
+    if (
+      !selectedDate ||
+      !canManageEntries ||
+      (pendingMemberIds.length === 0 && pendingRemovedMemberIds.length === 0)
+    ) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    setError("");
+    setNotice("");
+
+    try {
+      const nextDayMembers =
+        pendingMemberIds.length > 0
+          ? await Promise.all(
+              pendingMemberIds.map((memberId) =>
+                addYoutubeVideoDayMember(selectedDate, memberId),
+              ),
+            )
+          : [];
+
+      const removableEntries =
+        pendingRemovedMemberIds.length > 0
+          ? selectedDayMembers.filter((entry) =>
+              pendingRemovedMemberIds.includes(entry.memberId),
+            )
+          : [];
+
+      if (removableEntries.length > 0) {
+        await Promise.all(
+          removableEntries.map((entry) => deleteYoutubeVideoDayMember(entry.id)),
+        );
+      }
+
+      setDayMembers((current) => {
+        const next = current.filter(
+          (entry) =>
+            !(
+              entry.videoDate === selectedDate &&
+              pendingRemovedMemberIds.includes(entry.memberId)
+            ),
+        );
+
+        nextDayMembers.forEach((nextDayMember) => {
+          const exists = next.some(
+            (item) =>
+              item.videoDate === nextDayMember.videoDate &&
+              item.memberId === nextDayMember.memberId,
+          );
+
+          if (!exists) {
+            next.push(nextDayMember);
+          }
+        });
+
+        return next.sort((left, right) =>
+          right.videoDate.localeCompare(left.videoDate) ||
+          left.createdAt.localeCompare(right.createdAt),
+        );
+      });
+      setPendingMemberIds([]);
+      setPendingRemovedMemberIds([]);
+      setIsDayMembersEditorOpen(false);
+      setNotice("Katilanlar listesi guncellendi.");
+    } catch (errorValue) {
+      if (await handleSessionTimeout(errorValue)) {
+        return;
+      }
+
+      setError(getAuthErrorMessage(errorValue));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
   const entriesByDate = useMemo(() => {
     return entries.reduce<Record<string, YoutubeVideoEntry[]>>((acc, entry) => {
       acc[entry.videoDate] ??= [];
@@ -362,8 +458,48 @@ export function YoutubeVideosPage() {
     }, {});
   }, [entries]);
 
+  const dayMembersByDate = useMemo(() => {
+    return dayMembers.reduce<Record<string, YoutubeVideoDayMember[]>>(
+      (acc, entry) => {
+        acc[entry.videoDate] ??= [];
+        acc[entry.videoDate].push(entry);
+        return acc;
+      },
+      {},
+    );
+  }, [dayMembers]);
+
   const calendarDays = useMemo(() => buildCalendarDays(visibleMonth), [visibleMonth]);
   const selectedEntries = selectedDate ? entriesByDate[selectedDate] ?? [] : [];
+  const selectedDayMembers = selectedDate ? dayMembersByDate[selectedDate] ?? [] : [];
+  const selectedDayMemberIds = new Set(selectedDayMembers.map((entry) => entry.memberId));
+  const selectedDayMemberOptions = eligibleMembers.filter(
+    (member) => !selectedDayMemberIds.has(member.id),
+  );
+  const pendingDayMemberLabels = pendingMemberIds
+    .map(
+      (memberId) =>
+        eligibleMembers.find((member) => member.id === memberId)?.username ??
+        eligibleMembers.find((member) => member.id === memberId)?.name ??
+        memberId,
+    )
+    .filter((value, index, array) => array.indexOf(value) === index);
+  const pendingRemovedDayMemberLabels = pendingRemovedMemberIds
+    .map(
+      (memberId) =>
+        eligibleMembers.find((member) => member.id === memberId)?.username ??
+        eligibleMembers.find((member) => member.id === memberId)?.name ??
+        memberId,
+    )
+    .filter((value, index, array) => array.indexOf(value) === index);
+  const selectedDayMemberLabels = selectedDayMembers
+    .map(
+      (entry) =>
+        eligibleMembers.find((member) => member.id === entry.memberId)?.username ??
+        eligibleMembers.find((member) => member.id === entry.memberId)?.name ??
+        entry.memberId,
+    )
+    .filter((value, index, array) => array.indexOf(value) === index);
 
   if (isBooting) {
     return (
@@ -599,6 +735,188 @@ export function YoutubeVideosPage() {
               />
             </Panel>
           )}
+
+          {selectedEntries.length > 0 ? (
+            <Panel>
+              <SectionHeader
+                title="Katilanlar listesi"
+                description="Bu gunle iliskilendirdigimiz kisiler burada gorunur."
+              />
+
+              {selectedDayMemberLabels.length > 0 ? (
+                <div className="mb-4 flex flex-wrap gap-2">
+                  {selectedDayMembers.map((entry) => {
+                    const label =
+                      eligibleMembers.find((member) => member.id === entry.memberId)
+                        ?.username ??
+                      eligibleMembers.find((member) => member.id === entry.memberId)
+                        ?.name ??
+                      entry.memberId;
+                    const isSelectedForRemoval = pendingRemovedMemberIds.includes(
+                      entry.memberId,
+                    );
+
+                    return (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        disabled={!canManageEntries || !isDayMembersEditorOpen}
+                        onClick={() =>
+                          setPendingRemovedMemberIds((current) =>
+                            current.includes(entry.memberId)
+                              ? current.filter((item) => item !== entry.memberId)
+                              : [...current, entry.memberId],
+                          )
+                        }
+                        className={cx(
+                          "inline-flex rounded-full border px-3 py-2 text-sm font-semibold transition",
+                          isSelectedForRemoval
+                            ? "border-transparent bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_12px_24px_rgba(141,106,232,0.22)]"
+                            : "border-[rgba(141,106,232,0.18)] bg-[linear-gradient(145deg,rgba(246,241,255,0.96),rgba(255,255,255,0.92))] text-[#8d6ae8]",
+                          (!canManageEntries || !isDayMembersEditorOpen) &&
+                            "cursor-default",
+                        )}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <ToneMessage tone="muted">
+                  Bu gun icin henuz kisi eklenmedi.
+                </ToneMessage>
+              )}
+
+              {canManageEntries ? (
+                <div className="space-y-4">
+                  <PrimaryButton
+                    type="button"
+                    disabled={isSubmitting || selectedDayMemberOptions.length === 0}
+                    onClick={() => {
+                      setError("");
+                      setNotice("");
+                      setPendingMemberIds([]);
+                      setIsDayMembersEditorOpen((current) => !current);
+                    }}
+                  >
+                    {isDayMembersEditorOpen ? "Duzenlemeyi kapat" : "Bu gune kisi ekle"}
+                  </PrimaryButton>
+
+                  {isDayMembersEditorOpen ? (
+                    <div className="space-y-4 rounded-[24px] border border-[rgba(141,106,232,0.12)] bg-[linear-gradient(145deg,rgba(255,244,250,0.76),rgba(247,242,255,0.88),rgba(243,251,246,0.78))] p-4">
+                      {selectedDayMemberLabels.length > 0 ? (
+                        <div className="space-y-2">
+                          <strong className="block text-sm text-[#182127]">
+                            Cikarilacaklar
+                          </strong>
+                          {pendingRemovedDayMemberLabels.length > 0 ? (
+                            <div className="flex flex-wrap gap-2">
+                              {pendingRemovedDayMemberLabels.map((label) => (
+                                <span
+                                  key={label}
+                                  className="inline-flex rounded-full border border-[rgba(141,106,232,0.18)] bg-[linear-gradient(145deg,rgba(246,241,255,0.96),rgba(255,255,255,0.92))] px-3 py-2 text-sm font-semibold text-[#8d6ae8]"
+                                >
+                                  {label}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <ToneMessage tone="muted">
+                              Ustteki ekli kisilere tiklayarak cikarilacaklari
+                              secebilirsin.
+                            </ToneMessage>
+                          )}
+                        </div>
+                      ) : null}
+
+                      {selectedDayMemberOptions.length > 0 ? (
+                        <div className="flex flex-wrap gap-2">
+                          {selectedDayMemberOptions.map((member) => {
+                            const label = `@${member.username ?? member.name}`;
+                            const isSelected = pendingMemberIds.includes(member.id);
+
+                            return (
+                              <button
+                                key={member.id}
+                                type="button"
+                                onClick={() =>
+                                  setPendingMemberIds((current) =>
+                                    current.includes(member.id)
+                                      ? current.filter((item) => item !== member.id)
+                                      : [...current, member.id],
+                                  )
+                                }
+                                className={cx(
+                                  "inline-flex rounded-full border px-3 py-2 text-sm font-semibold transition",
+                                  isSelected
+                                    ? "border-transparent bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_12px_24px_rgba(141,106,232,0.22)]"
+                                    : "border-[rgba(141,106,232,0.18)] bg-white/85 text-[#182127]",
+                                )}
+                              >
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <ToneMessage tone="muted">
+                          Eklenebilecek baska kisi kalmadi.
+                        </ToneMessage>
+                      )}
+
+                      {pendingDayMemberLabels.length > 0 ? (
+                        <div className="space-y-2">
+                          <strong className="block text-sm text-[#182127]">
+                            Eklenecekler
+                          </strong>
+                          <div className="flex flex-wrap gap-2">
+                            {pendingDayMemberLabels.map((label) => (
+                              <span
+                                key={label}
+                                className="inline-flex rounded-full border border-[rgba(141,106,232,0.18)] bg-[linear-gradient(145deg,rgba(246,241,255,0.96),rgba(255,255,255,0.92))] px-3 py-2 text-sm font-semibold text-[#8d6ae8]"
+                              >
+                                {label}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+
+                      <div className="flex flex-wrap gap-3">
+                        <PrimaryButton
+                          type="button"
+                          disabled={
+                            isSubmitting ||
+                            (pendingMemberIds.length === 0 &&
+                              pendingRemovedMemberIds.length === 0)
+                          }
+                          onClick={() => void handleSaveDayMembers()}
+                        >
+                          Duzenlemeyi kaydet
+                        </PrimaryButton>
+                        <button
+                          type="button"
+                          className="rounded-[18px] border border-[rgba(141,106,232,0.14)] bg-white/80 px-4 py-3 text-sm font-semibold text-[#182127]"
+                          onClick={() => {
+                            setPendingMemberIds([]);
+                            setPendingRemovedMemberIds([]);
+                            setIsDayMembersEditorOpen(false);
+                          }}
+                        >
+                          Vazgec
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : selectedDayMemberLabels.length > 0 ? null : (
+                <ToneMessage tone="muted">
+                  Bu gun icin henuz kisi eklenmedi.
+                </ToneMessage>
+              )}
+            </Panel>
+          ) : null}
         </div>
       )}
     </div>

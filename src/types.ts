@@ -60,6 +60,14 @@ export type YoutubeVideoEntry = {
   createdBy: string;
 };
 
+export type YoutubeVideoDayMember = {
+  id: string;
+  videoDate: string;
+  memberId: string;
+  createdAt: string;
+  createdBy: string;
+};
+
 export type AppData = {
   members: Member[];
   suggestions: Suggestion[];
