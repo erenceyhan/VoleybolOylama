@@ -10,6 +10,7 @@ import {
   fetchTrainingPlanEligibleMembers,
   fetchTrainingPlanEvents,
   fetchTrainingPlanResponses,
+  fetchTrainingPlanResponseSummaries,
   fetchTrainingPlanSettings,
   getRemoteSessionMember,
   lockTrainingPlanEvent,
@@ -150,10 +151,17 @@ export function TrainingPlanPage() {
   const [responses, setResponses] = useState<TrainingPlanResponse[]>([]);
   const [trainingPlanSettings, setTrainingPlanSettings] =
     useState<TrainingPlanSettings>(DEFAULT_TRAINING_PLAN_SETTINGS);
+  const [eventResponseSummaries, setEventResponseSummaries] = useState<
+    Record<string, { total: number; yes: number; maybe: number; no: number }>
+  >({});
   const [selectedEventId, setSelectedEventId] = useState("");
   const [pageError, setPageError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  const [createActionError, setCreateActionError] = useState<string | null>(null);
+  const [createActionSuccess, setCreateActionSuccess] = useState<string | null>(
+    null,
+  );
   const [responseActionError, setResponseActionError] = useState<string | null>(null);
   const [responseActionSuccess, setResponseActionSuccess] = useState<string | null>(
     null,
@@ -166,6 +174,7 @@ export function TrainingPlanPage() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isEventDetailOpen, setIsEventDetailOpen] = useState(false);
+  const [isCreateEventOpen, setIsCreateEventOpen] = useState(false);
   const [isSlotBreakdownOpen, setIsSlotBreakdownOpen] = useState(false);
   const [isTrainingSchoolsOpen, setIsTrainingSchoolsOpen] = useState(false);
   const [isPastEventsOpen, setIsPastEventsOpen] = useState(false);
@@ -236,6 +245,13 @@ export function TrainingPlanPage() {
       no: responses.filter((response) => response.status === "no"),
     };
   }, [responses]);
+  const currentMemberResponse = useMemo(() => {
+    if (!currentMember) {
+      return null;
+    }
+
+    return responses.find((response) => response.memberId === currentMember.id) ?? null;
+  }, [currentMember, responses]);
 
   const nonVoters = useMemo(() => {
     const respondedMemberIds = new Set(responses.map((response) => response.memberId));
@@ -305,6 +321,39 @@ export function TrainingPlanPage() {
     const pastEventIds = new Set(pastEvents.map((event) => event.id));
     return events.filter((event) => !pastEventIds.has(event.id));
   }, [events, pastEvents]);
+  const rankedActiveEvents = useMemo(() => {
+    return [...activeEvents].sort((left, right) => {
+      const rightSummary = eventResponseSummaries[right.id] ?? {
+        total: 0,
+        yes: 0,
+        maybe: 0,
+        no: 0,
+      };
+      const leftSummary = eventResponseSummaries[left.id] ?? {
+        total: 0,
+        yes: 0,
+        maybe: 0,
+        no: 0,
+      };
+
+      const rightScore = rightSummary.yes * 2 + rightSummary.maybe;
+      const leftScore = leftSummary.yes * 2 + leftSummary.maybe;
+
+      if (rightScore !== leftScore) {
+        return rightScore - leftScore;
+      }
+
+      if (rightSummary.total !== leftSummary.total) {
+        return rightSummary.total - leftSummary.total;
+      }
+
+      return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+    });
+  }, [activeEvents, eventResponseSummaries]);
+  const featuredActiveEvent = rankedActiveEvents[0] ?? null;
+  const remainingActiveEvents = featuredActiveEvent
+    ? rankedActiveEvents.slice(1)
+    : [];
   const canCreateEvents = Boolean(
     currentMember && (currentMember.role === "admin" || currentMember.approved),
   );
@@ -361,13 +410,20 @@ export function TrainingPlanPage() {
       }
 
       try {
-        const [member, nextEvents, nextEligibleMembers, nextSettings] =
+        const [
+          member,
+          nextEvents,
+          nextEligibleMembers,
+          nextResponseSummaries,
+          nextSettings,
+        ] =
           await Promise.all([
-          getRemoteSessionMember(),
-          fetchTrainingPlanEvents(),
-          fetchTrainingPlanEligibleMembers(),
-          fetchTrainingPlanSettings(),
-        ]);
+            getRemoteSessionMember(),
+            fetchTrainingPlanEvents(),
+            fetchTrainingPlanEligibleMembers(),
+            fetchTrainingPlanResponseSummaries(),
+            fetchTrainingPlanSettings(),
+          ]);
 
         if (!member) {
           router.replace("/");
@@ -381,6 +437,7 @@ export function TrainingPlanPage() {
         setCurrentMember(member);
         setEvents(nextEvents);
         setEligibleMembers(nextEligibleMembers);
+        setEventResponseSummaries(nextResponseSummaries);
         setTrainingPlanSettings(nextSettings);
         setAmatorMatchProgramLinkDraft(nextSettings.amatorMatchProgramLink);
         setVoleyboloynaLinkDraft(nextSettings.voleyboloynaLink);
@@ -518,14 +575,10 @@ export function TrainingPlanPage() {
       return;
     }
 
-    const existingResponse = responses.find(
-      (response) => response.memberId === currentMember.id,
-    );
-
-    if (existingResponse) {
-      setResponseStatus(existingResponse.status);
-      setResponseSlots(existingResponse.selectedSlots);
-      setResponseNote(existingResponse.note);
+    if (currentMemberResponse) {
+      setResponseStatus(currentMemberResponse.status);
+      setResponseSlots(currentMemberResponse.selectedSlots);
+      setResponseNote(currentMemberResponse.note);
       setResponseActionError(null);
       setResponseActionSuccess(null);
       return;
@@ -536,7 +589,7 @@ export function TrainingPlanPage() {
     setResponseNote("");
     setResponseActionError(null);
     setResponseActionSuccess(null);
-  }, [currentMember, responses, selectedEvent]);
+  }, [currentMemberResponse, selectedEvent]);
 
   function clearCreateForm() {
     setCreateTitle("");
@@ -547,11 +600,17 @@ export function TrainingPlanPage() {
     setCreateMatchHour(TRAINING_PLAN_HOURS[3]);
     setCreateMatchSource("amator");
     setCreateMatchLink("");
+    setCreateActionError(null);
+    setCreateActionSuccess(null);
   }
 
   async function refreshEvents(nextSelectedId?: string) {
-    const nextEvents = await fetchTrainingPlanEvents();
+    const [nextEvents, nextResponseSummaries] = await Promise.all([
+      fetchTrainingPlanEvents(),
+      fetchTrainingPlanResponseSummaries(),
+    ]);
     setEvents(nextEvents);
+    setEventResponseSummaries(nextResponseSummaries);
 
     if (nextSelectedId !== undefined) {
       setSelectedEventId(nextSelectedId);
@@ -571,16 +630,22 @@ export function TrainingPlanPage() {
   }
 
   async function refreshResponses(eventId: string) {
-    const nextResponses = await fetchTrainingPlanResponses(eventId);
+    const [nextResponses, nextResponseSummaries] = await Promise.all([
+      fetchTrainingPlanResponses(eventId),
+      fetchTrainingPlanResponseSummaries(),
+    ]);
     setResponses(nextResponses);
+    setEventResponseSummaries(nextResponseSummaries);
   }
 
   async function handleCreateEvent() {
     setActionError(null);
     setActionSuccess(null);
+    setCreateActionError(null);
+    setCreateActionSuccess(null);
 
     if (createType === "training" && Object.keys(createSlots).length === 0) {
-      setActionError("Antrenman icin en az bir gun secmeliyiz.");
+      setCreateActionError("Antrenman icin en az bir gun secmeliyiz.");
       return;
     }
 
@@ -588,12 +653,12 @@ export function TrainingPlanPage() {
       createType === "training" &&
       countTrainingPlanSelectedSlots(createSlots) === 0
     ) {
-      setActionError("Antrenman icin secilen gunlere en az bir saat vermeliyiz.");
+      setCreateActionError("Antrenman icin secilen gunlere en az bir saat vermeliyiz.");
       return;
     }
 
     if (createType === "training" && hasTrainingPlanEmptyDay(createSlots)) {
-      setActionError("Sectigimiz her gun icin en az bir saat belirlemeliyiz.");
+      setCreateActionError("Sectigimiz her gun icin en az bir saat belirlemeliyiz.");
       return;
     }
 
@@ -602,7 +667,7 @@ export function TrainingPlanPage() {
       createMatchSource === "voleyboloyna" &&
       !normalizeTrainingPlanLink(trainingPlanSettings.voleyboloynaLink)
     ) {
-      setActionError(
+      setCreateActionError(
         "VoleybolOyna maci olusturmadan once exceli bir kez kaydetmeliyiz.",
       );
       return;
@@ -613,9 +678,18 @@ export function TrainingPlanPage() {
       createMatchSource === "amator" &&
       !normalizeTrainingPlanLink(trainingPlanSettings.amatorMatchProgramLink)
     ) {
-      setActionError(
+      setCreateActionError(
         "Amator macini olusturmadan once mac programini bir kez kaydetmeliyiz.",
       );
+      return;
+    }
+
+    const confirmMessage =
+      createType === "training"
+        ? "Yeni antrenman olusturmak uzeresiniz, emin misiniz?"
+        : "Yeni mac olusturmak uzeresiniz, emin misiniz?";
+
+    if (typeof window !== "undefined" && !window.confirm(confirmMessage)) {
       return;
     }
 
@@ -646,15 +720,17 @@ export function TrainingPlanPage() {
 
       await refreshEvents(createdEvent.id);
       setIsEventDetailOpen(true);
+      setIsCreateEventOpen(false);
       clearCreateForm();
       setActionSuccess("Yeni plan olusturuldu. Detay popup olarak acildi.");
+      setCreateActionSuccess("Yeni etkinlik olusturuldu.");
     } catch (error) {
       if (isSessionTimeoutError(error)) {
         redirectToTimeout(router);
         return;
       }
 
-      setActionError(
+      setCreateActionError(
         getErrorMessage(error, "Plan olusturulurken bir hata olustu."),
       );
     } finally {
@@ -992,7 +1068,11 @@ export function TrainingPlanPage() {
                 disabled={isSavingResponse}
                 onClick={() => void handleSaveResponse()}
               >
-                {isSavingResponse ? "Kaydediliyor..." : "Katilimi kaydet"}
+                {isSavingResponse
+                  ? "Kaydediliyor..."
+                  : currentMemberResponse
+                    ? "Secimimi guncelle"
+                    : "Secimimi kaydet"}
               </PrimaryButton>
 
               {canManageSelectedEvent && !selectedEvent.isLocked && bestSlot ? (
@@ -1138,6 +1218,340 @@ export function TrainingPlanPage() {
     </>
   ) : null;
 
+  const createEventContent = canCreateEvents ? (
+    <div className="grid gap-4">
+      <FieldBlock label="Etkinlik adi (opsiyonel)">
+        <TextInput
+          value={createTitle}
+          onChange={(event) => setCreateTitle(event.target.value)}
+          placeholder={`Bos birakirsak ${buildTrainingPlanEventTitle(createType)} olarak olusur.`}
+        />
+      </FieldBlock>
+
+      <FieldBlock label="Etkinlik tipi">
+        <div className="grid grid-cols-2 gap-2 rounded-[24px] border border-[rgba(141,106,232,0.12)] bg-[linear-gradient(145deg,rgba(255,255,255,0.84),rgba(246,241,255,0.72))] p-1.5">
+          <button
+            type="button"
+            onClick={() => setCreateType("training")}
+            className={cx(
+              "rounded-[18px] px-4 py-3 text-sm font-semibold transition duration-200",
+              createType === "training"
+                ? "bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)]"
+                : "bg-transparent text-[#5f6d76] hover:bg-white/70 hover:text-[#182127]",
+            )}
+          >
+            Antrenman
+          </button>
+          <button
+            type="button"
+            onClick={() => setCreateType("match")}
+            className={cx(
+              "rounded-[18px] px-4 py-3 text-sm font-semibold transition duration-200",
+              createType === "match"
+                ? "bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)]"
+                : "bg-transparent text-[#5f6d76] hover:bg-white/70 hover:text-[#182127]",
+            )}
+          >
+            Mac
+          </button>
+        </div>
+      </FieldBlock>
+
+      {createType === "training" ? (
+        <>
+          <FieldBlock label="Gunler">
+            <ChipGrid
+              values={[...TRAINING_PLAN_DAYS]}
+              selectedValues={sortTrainingPlanDays(Object.keys(createSlots))}
+              onToggle={(value) =>
+                setCreateSlots((current) => toggleTrainingPlanSlotDay(current, value))
+              }
+            />
+          </FieldBlock>
+
+          {sortTrainingPlanDays(Object.keys(createSlots)).length > 0 ? (
+            <FieldBlock label="Gun bazli saatler">
+              <DaySlotSelector
+                availableDays={sortTrainingPlanDays(Object.keys(createSlots))}
+                hourOptions={[...TRAINING_PLAN_HOURS]}
+                selectedSlots={createSlots}
+                onToggleHour={(day, hour) =>
+                  setCreateSlots((current) =>
+                    toggleTrainingPlanSlotHour(current, day, hour),
+                  )
+                }
+              />
+            </FieldBlock>
+          ) : null}
+
+          <SoftCard className="space-y-4">
+            <div className="space-y-1">
+              <strong className="block text-sm text-[#182127]">Okullar</strong>
+              <p className="text-sm text-[#5f6d76]">
+                Okul, fiyat ve adres bilgilerini popup&apos;ta acabiliriz.
+              </p>
+            </div>
+            <SecondaryButton
+              type="button"
+              onClick={() => setIsTrainingSchoolsOpen(true)}
+            >
+              Okullari gor
+            </SecondaryButton>
+          </SoftCard>
+        </>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
+          <FieldBlock label="Mac kaynagi">
+            <div className="grid grid-cols-2 gap-2 rounded-[24px] border border-[rgba(141,106,232,0.12)] bg-[linear-gradient(145deg,rgba(255,255,255,0.84),rgba(246,241,255,0.72))] p-1.5">
+              <button
+                type="button"
+                onClick={() => setCreateMatchSource("amator")}
+                className={cx(
+                  "rounded-[18px] px-4 py-3 text-sm font-semibold transition duration-200",
+                  createMatchSource === "amator"
+                    ? "bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)]"
+                    : "bg-transparent text-[#5f6d76] hover:bg-white/70 hover:text-[#182127]",
+                )}
+              >
+                Amator
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreateMatchSource("voleyboloyna")}
+                className={cx(
+                  "rounded-[18px] px-4 py-3 text-sm font-semibold transition duration-200",
+                  createMatchSource === "voleyboloyna"
+                    ? "bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)]"
+                    : "bg-transparent text-[#5f6d76] hover:bg-white/70 hover:text-[#182127]",
+                )}
+              >
+                VoleybolOyna
+              </button>
+            </div>
+          </FieldBlock>
+
+          {createMatchSource === "amator" ? (
+            <SoftCard className="space-y-4 md:col-span-2 xl:col-span-1">
+              <div className="space-y-1">
+                <strong className="block text-sm text-[#182127]">
+                  Amator mac programi
+                </strong>
+              </div>
+
+              {isAdmin ? (
+                isEditingAmatorMatchProgramLink ||
+                !trainingPlanSettings.amatorMatchProgramLink ? (
+                  <div className="grid gap-3">
+                    <TextInput
+                      value={amatorMatchProgramLinkDraft}
+                      onChange={(event) =>
+                        setAmatorMatchProgramLinkDraft(event.target.value)
+                      }
+                      placeholder="Ornek: https://..."
+                    />
+                    <div className="flex flex-wrap gap-3">
+                      <SecondaryButton
+                        type="button"
+                        disabled={isSavingSettings}
+                        onClick={() => void handleSaveTrainingSettings("amator")}
+                      >
+                        {isSavingSettings ? "Kaydediliyor..." : "Kaydet"}
+                      </SecondaryButton>
+                      {trainingPlanSettings.amatorMatchProgramLink ? (
+                        <GhostButton
+                          type="button"
+                          onClick={() => {
+                            setAmatorMatchProgramLinkDraft(
+                              trainingPlanSettings.amatorMatchProgramLink,
+                            );
+                            setIsEditingAmatorMatchProgramLink(false);
+                          }}
+                        >
+                          Iptal
+                        </GhostButton>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-3">
+                    <a
+                      href={trainingPlanSettings.amatorMatchProgramLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center rounded-full border border-[rgba(141,106,232,0.16)] bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] px-4 py-2 text-sm font-semibold text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)] transition hover:brightness-105"
+                    >
+                      Sayfayi ac
+                    </a>
+                    <GhostButton
+                      type="button"
+                      onClick={() => {
+                        setAmatorMatchProgramLinkDraft(
+                          trainingPlanSettings.amatorMatchProgramLink,
+                        );
+                        setIsEditingAmatorMatchProgramLink(true);
+                      }}
+                    >
+                      Duzenle
+                    </GhostButton>
+                  </div>
+                )
+              ) : trainingPlanSettings.amatorMatchProgramLink ? (
+                <a
+                  href={trainingPlanSettings.amatorMatchProgramLink}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center rounded-full border border-[rgba(141,106,232,0.16)] bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] px-4 py-2 text-sm font-semibold text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)] transition hover:brightness-105"
+                >
+                  Sayfayi ac
+                </a>
+              ) : (
+                <div className="rounded-[18px] border border-[rgba(141,106,232,0.1)] bg-white/74 px-4 py-3 text-sm text-[#5f6d76]">
+                  Henuz mac programi eklenmedi.
+                </div>
+              )}
+            </SoftCard>
+          ) : (
+            <SoftCard className="space-y-4 md:col-span-2 xl:col-span-1">
+              <div className="space-y-1">
+                <strong className="block text-sm text-[#182127]">
+                  VoleybolOyna excel
+                </strong>
+              </div>
+
+              {isAdmin ? (
+                isEditingVoleyboloynaLink || !trainingPlanSettings.voleyboloynaLink ? (
+                  <div className="grid gap-3">
+                    <TextInput
+                      value={voleyboloynaLinkDraft}
+                      onChange={(event) => setVoleyboloynaLinkDraft(event.target.value)}
+                      placeholder="Ornek: https://voleyboloyna.com/..."
+                    />
+                    <div className="flex flex-wrap gap-3">
+                      <SecondaryButton
+                        type="button"
+                        disabled={isSavingSettings}
+                        onClick={() => void handleSaveTrainingSettings("voleyboloyna")}
+                      >
+                        {isSavingSettings ? "Kaydediliyor..." : "Kaydet"}
+                      </SecondaryButton>
+                      {trainingPlanSettings.voleyboloynaLink ? (
+                        <GhostButton
+                          type="button"
+                          onClick={() => {
+                            setVoleyboloynaLinkDraft(
+                              trainingPlanSettings.voleyboloynaLink,
+                            );
+                            setIsEditingVoleyboloynaLink(false);
+                          }}
+                        >
+                          Iptal
+                        </GhostButton>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-3">
+                    <a
+                      href={trainingPlanSettings.voleyboloynaLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center rounded-full border border-[rgba(141,106,232,0.16)] bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] px-4 py-2 text-sm font-semibold text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)] transition hover:brightness-105"
+                    >
+                      Excele git
+                    </a>
+                    <GhostButton
+                      type="button"
+                      onClick={() => {
+                        setVoleyboloynaLinkDraft(trainingPlanSettings.voleyboloynaLink);
+                        setIsEditingVoleyboloynaLink(true);
+                      }}
+                    >
+                      Duzenle
+                    </GhostButton>
+                  </div>
+                )
+              ) : trainingPlanSettings.voleyboloynaLink ? (
+                <a
+                  href={trainingPlanSettings.voleyboloynaLink}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center rounded-full border border-[rgba(141,106,232,0.16)] bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] px-4 py-2 text-sm font-semibold text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)] transition hover:brightness-105"
+                >
+                  Excele git
+                </a>
+              ) : (
+                <div className="rounded-[18px] border border-[rgba(141,106,232,0.1)] bg-white/74 px-4 py-3 text-sm text-[#5f6d76]">
+                  Henuz excel eklenmedi.
+                </div>
+              )}
+            </SoftCard>
+          )}
+
+          {createMatchSource === "amator" ? (
+            <FieldBlock label="Mac linki (opsiyonel)">
+              <TextInput
+                value={createMatchLink}
+                onChange={(event) => setCreateMatchLink(event.target.value)}
+                placeholder="Ornek: https://..."
+              />
+            </FieldBlock>
+          ) : null}
+
+          <FieldBlock label="Mac gunu">
+            <SelectInput
+              value={createMatchDay}
+              onChange={(event) => setCreateMatchDay(event.target.value)}
+            >
+              {TRAINING_PLAN_DAYS.map((day) => (
+                <option key={day} value={day}>
+                  {day}
+                </option>
+              ))}
+            </SelectInput>
+          </FieldBlock>
+
+          <FieldBlock label="Mac saati">
+            <SelectInput
+              value={createMatchHour}
+              onChange={(event) => setCreateMatchHour(event.target.value)}
+            >
+              {TRAINING_PLAN_HOURS.map((hour) => (
+                <option key={hour} value={hour}>
+                  {hour}
+                </option>
+              ))}
+            </SelectInput>
+          </FieldBlock>
+        </div>
+      )}
+
+      {createActionError ? (
+        <ToneMessage tone="error">{createActionError}</ToneMessage>
+      ) : null}
+      {createActionSuccess ? (
+        <ToneMessage tone="success">{createActionSuccess}</ToneMessage>
+      ) : null}
+
+      <div className="flex flex-wrap gap-3">
+        <PrimaryButton
+          type="button"
+          disabled={isCreating}
+          onClick={() => void handleCreateEvent()}
+        >
+          {isCreating ? "Olusturuluyor..." : "Etkinlik olustur"}
+        </PrimaryButton>
+        <GhostButton type="button" onClick={clearCreateForm}>
+          Formu temizle
+        </GhostButton>
+      </div>
+    </div>
+  ) : (
+    <ToneMessage tone="muted">
+      Etkinlik olusturma alani sadece onayli uyeler ve admin hesaplari icin acik.
+      Diger uyeler mevcut planlari takip edebilir.
+    </ToneMessage>
+  );
+
   if (isBooting) {
     return (
       <Panel>
@@ -1196,415 +1610,65 @@ export function TrainingPlanPage() {
         <div className="order-2 grid gap-6 xl:order-1">
           <Panel className="space-y-5">
             <SectionHeader
-              title="Antrenman plani"
-              description="Referans projedeki etkinlik + katilim + en uygun saat akisini bu sekmeye ayirdik."
+              title="Etkinlik olustur"
+              description="Yeni antrenman veya mac olusturma popup olarak acilir."
             />
-
             {canCreateEvents ? (
-                <div className="grid gap-4">
-                <FieldBlock label="Etkinlik adi (opsiyonel)">
-                  <TextInput
-                    value={createTitle}
-                    onChange={(event) => setCreateTitle(event.target.value)}
-                    placeholder={`Bos birakirsak ${buildTrainingPlanEventTitle(createType)} olarak olusur.`}
-                  />
-                </FieldBlock>
-
-                <FieldBlock label="Etkinlik tipi">
-                  <div className="grid grid-cols-2 gap-2 rounded-[24px] border border-[rgba(141,106,232,0.12)] bg-[linear-gradient(145deg,rgba(255,255,255,0.84),rgba(246,241,255,0.72))] p-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setCreateType("training")}
-                      className={cx(
-                        "rounded-[18px] px-4 py-3 text-sm font-semibold transition duration-200",
-                        createType === "training"
-                          ? "bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)]"
-                          : "bg-transparent text-[#5f6d76] hover:bg-white/70 hover:text-[#182127]",
-                      )}
-                    >
-                      Antrenman
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCreateType("match")}
-                      className={cx(
-                        "rounded-[18px] px-4 py-3 text-sm font-semibold transition duration-200",
-                        createType === "match"
-                          ? "bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)]"
-                          : "bg-transparent text-[#5f6d76] hover:bg-white/70 hover:text-[#182127]",
-                      )}
-                    >
-                      Mac
-                    </button>
-                  </div>
-                </FieldBlock>
-
-                {createType === "training" ? (
-                  <>
-                    <FieldBlock label="Gunler">
-                      <ChipGrid
-                        values={[...TRAINING_PLAN_DAYS]}
-                        selectedValues={sortTrainingPlanDays(Object.keys(createSlots))}
-                        onToggle={(value) =>
-                          setCreateSlots((current) =>
-                            toggleTrainingPlanSlotDay(current, value),
-                          )
-                        }
-                      />
-                    </FieldBlock>
-
-                    {sortTrainingPlanDays(Object.keys(createSlots)).length > 0 ? (
-                      <FieldBlock label="Gun bazli saatler">
-                        <DaySlotSelector
-                          availableDays={sortTrainingPlanDays(Object.keys(createSlots))}
-                          hourOptions={[...TRAINING_PLAN_HOURS]}
-                          selectedSlots={createSlots}
-                          onToggleHour={(day, hour) =>
-                            setCreateSlots((current) =>
-                              toggleTrainingPlanSlotHour(current, day, hour),
-                            )
-                          }
-                        />
-                      </FieldBlock>
-                    ) : null}
-
-                    <SoftCard className="space-y-4">
-                      <div className="space-y-1">
-                        <strong className="block text-sm text-[#182127]">
-                          Okullar
-                        </strong>
-                        <p className="text-sm text-[#5f6d76]">
-                          Okul, fiyat ve adres bilgilerini popup'ta
-                          acabiliriz.
-                        </p>
-                      </div>
-                      <SecondaryButton
-                        type="button"
-                        onClick={() => setIsTrainingSchoolsOpen(true)}
-                      >
-                        Okullari gor
-                      </SecondaryButton>
-                    </SoftCard>
-                  </>
-                ) : (
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
-                    <FieldBlock label="Mac kaynagi">
-                      <div className="grid grid-cols-2 gap-2 rounded-[24px] border border-[rgba(141,106,232,0.12)] bg-[linear-gradient(145deg,rgba(255,255,255,0.84),rgba(246,241,255,0.72))] p-1.5">
-                        <button
-                          type="button"
-                          onClick={() => setCreateMatchSource("amator")}
-                          className={cx(
-                            "rounded-[18px] px-4 py-3 text-sm font-semibold transition duration-200",
-                            createMatchSource === "amator"
-                              ? "bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)]"
-                              : "bg-transparent text-[#5f6d76] hover:bg-white/70 hover:text-[#182127]",
-                          )}
-                        >
-                          Amator
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setCreateMatchSource("voleyboloyna")}
-                          className={cx(
-                            "rounded-[18px] px-4 py-3 text-sm font-semibold transition duration-200",
-                            createMatchSource === "voleyboloyna"
-                              ? "bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)]"
-                              : "bg-transparent text-[#5f6d76] hover:bg-white/70 hover:text-[#182127]",
-                          )}
-                        >
-                          VoleybolOyna
-                        </button>
-                      </div>
-                    </FieldBlock>
-
-                    {createMatchSource === "amator" ? (
-                      <SoftCard className="space-y-4 md:col-span-2 xl:col-span-1">
-                        <div className="space-y-1">
-                          <strong className="block text-sm text-[#182127]">
-                            Amator mac programi
-                          </strong>
-                        </div>
-
-                        {isAdmin ? (
-                          isEditingAmatorMatchProgramLink ||
-                          !trainingPlanSettings.amatorMatchProgramLink ? (
-                            <div className="grid gap-3">
-                              <TextInput
-                                value={amatorMatchProgramLinkDraft}
-                                onChange={(event) =>
-                                  setAmatorMatchProgramLinkDraft(
-                                    event.target.value,
-                                  )
-                                }
-                                placeholder="Ornek: https://..."
-                              />
-                              <div className="flex flex-wrap gap-3">
-                                <SecondaryButton
-                                  type="button"
-                                  disabled={isSavingSettings}
-                                  onClick={() =>
-                                    void handleSaveTrainingSettings("amator")
-                                  }
-                                >
-                                  {isSavingSettings ? "Kaydediliyor..." : "Kaydet"}
-                                </SecondaryButton>
-                                {trainingPlanSettings.amatorMatchProgramLink ? (
-                                  <GhostButton
-                                    type="button"
-                                    onClick={() => {
-                                      setAmatorMatchProgramLinkDraft(
-                                        trainingPlanSettings.amatorMatchProgramLink,
-                                      );
-                                      setIsEditingAmatorMatchProgramLink(false);
-                                    }}
-                                  >
-                                    Iptal
-                                  </GhostButton>
-                                ) : null}
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="flex flex-wrap gap-3">
-                              <a
-                                href={trainingPlanSettings.amatorMatchProgramLink}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center rounded-full border border-[rgba(141,106,232,0.16)] bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] px-4 py-2 text-sm font-semibold text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)] transition hover:brightness-105"
-                              >
-                                Sayfayi ac
-                              </a>
-                              <GhostButton
-                                type="button"
-                                onClick={() => {
-                                  setAmatorMatchProgramLinkDraft(
-                                    trainingPlanSettings.amatorMatchProgramLink,
-                                  );
-                                  setIsEditingAmatorMatchProgramLink(true);
-                                }}
-                              >
-                                Duzenle
-                              </GhostButton>
-                            </div>
-                          )
-                        ) : (
-                          <>
-                            {trainingPlanSettings.amatorMatchProgramLink ? (
-                              <a
-                                href={trainingPlanSettings.amatorMatchProgramLink}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center rounded-full border border-[rgba(141,106,232,0.16)] bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] px-4 py-2 text-sm font-semibold text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)] transition hover:brightness-105"
-                              >
-                                Sayfayi ac
-                              </a>
-                            ) : (
-                              <div className="rounded-[18px] border border-[rgba(141,106,232,0.1)] bg-white/74 px-4 py-3 text-sm text-[#5f6d76]">
-                                Henuz mac programi eklenmedi.
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </SoftCard>
-                    ) : (
-                      <SoftCard className="space-y-4 md:col-span-2 xl:col-span-1">
-                        <div className="space-y-1">
-                          <strong className="block text-sm text-[#182127]">
-                            VoleybolOyna excel
-                          </strong>
-                        </div>
-
-                        {isAdmin ? (
-                          isEditingVoleyboloynaLink ||
-                          !trainingPlanSettings.voleyboloynaLink ? (
-                            <div className="grid gap-3">
-                              <TextInput
-                                value={voleyboloynaLinkDraft}
-                                onChange={(event) =>
-                                  setVoleyboloynaLinkDraft(event.target.value)
-                                }
-                                placeholder="Ornek: https://voleyboloyna.com/..."
-                              />
-                              <div className="flex flex-wrap gap-3">
-                                <SecondaryButton
-                                  type="button"
-                                  disabled={isSavingSettings}
-                                  onClick={() =>
-                                    void handleSaveTrainingSettings(
-                                      "voleyboloyna",
-                                    )
-                                  }
-                                >
-                                  {isSavingSettings ? "Kaydediliyor..." : "Kaydet"}
-                                </SecondaryButton>
-                                {trainingPlanSettings.voleyboloynaLink ? (
-                                  <GhostButton
-                                    type="button"
-                                    onClick={() => {
-                                      setVoleyboloynaLinkDraft(
-                                        trainingPlanSettings.voleyboloynaLink,
-                                      );
-                                      setIsEditingVoleyboloynaLink(false);
-                                    }}
-                                  >
-                                    Iptal
-                                  </GhostButton>
-                                ) : null}
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="flex flex-wrap gap-3">
-                              <a
-                                href={trainingPlanSettings.voleyboloynaLink}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center rounded-full border border-[rgba(141,106,232,0.16)] bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] px-4 py-2 text-sm font-semibold text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)] transition hover:brightness-105"
-                              >
-                                Excele git
-                              </a>
-                              <GhostButton
-                                type="button"
-                                onClick={() => {
-                                  setVoleyboloynaLinkDraft(
-                                    trainingPlanSettings.voleyboloynaLink,
-                                  );
-                                  setIsEditingVoleyboloynaLink(true);
-                                }}
-                              >
-                                Duzenle
-                              </GhostButton>
-                            </div>
-                          )
-                        ) : (
-                          <>
-                            {trainingPlanSettings.voleyboloynaLink ? (
-                              <a
-                                href={trainingPlanSettings.voleyboloynaLink}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center rounded-full border border-[rgba(141,106,232,0.16)] bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] px-4 py-2 text-sm font-semibold text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)] transition hover:brightness-105"
-                              >
-                                Excele git
-                              </a>
-                            ) : (
-                              <div className="rounded-[18px] border border-[rgba(141,106,232,0.1)] bg-white/74 px-4 py-3 text-sm text-[#5f6d76]">
-                                Henuz excel eklenmedi.
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </SoftCard>
-                    )}
-
-                    {createMatchSource === "amator" ? (
-                      <FieldBlock label="Mac linki (opsiyonel)">
-                        <TextInput
-                          value={createMatchLink}
-                          onChange={(event) => setCreateMatchLink(event.target.value)}
-                          placeholder="Ornek: https://..."
-                        />
-                      </FieldBlock>
-                    ) : null}
-
-                    <FieldBlock label="Mac gunu">
-                      <SelectInput
-                        value={createMatchDay}
-                        onChange={(event) => setCreateMatchDay(event.target.value)}
-                      >
-                        {TRAINING_PLAN_DAYS.map((day) => (
-                          <option key={day} value={day}>
-                            {day}
-                          </option>
-                        ))}
-                      </SelectInput>
-                    </FieldBlock>
-
-                    <FieldBlock label="Mac saati">
-                      <SelectInput
-                        value={createMatchHour}
-                        onChange={(event) => setCreateMatchHour(event.target.value)}
-                      >
-                        {TRAINING_PLAN_HOURS.map((hour) => (
-                          <option key={hour} value={hour}>
-                            {hour}
-                          </option>
-                        ))}
-                      </SelectInput>
-                    </FieldBlock>
-                  </div>
-                )}
-
-                <div className="flex flex-wrap gap-3">
-                  <PrimaryButton
-                    type="button"
-                    disabled={isCreating}
-                    onClick={() => void handleCreateEvent()}
-                  >
-                    {isCreating ? "Olusturuluyor..." : "Etkinlik olustur"}
-                  </PrimaryButton>
-                  <GhostButton type="button" onClick={clearCreateForm}>
-                    Formu temizle
-                  </GhostButton>
-                </div>
+              <div className="flex flex-wrap gap-3">
+                <PrimaryButton
+                  type="button"
+                  onClick={() => setIsCreateEventOpen(true)}
+                >
+                  Etkinlik olustur
+                </PrimaryButton>
               </div>
-              ) : (
-                <ToneMessage tone="muted">
-                  Etkinlik olusturma alani sadece onayli uyeler ve admin hesaplari
-                  icin acik. Diger uyeler mevcut planlari takip edebilir.
-                </ToneMessage>
-              )}
+            ) : (
+              <ToneMessage tone="muted">
+                Etkinlik olusturma alani sadece onayli uyeler ve admin hesaplari
+                icin acik. Diger uyeler mevcut planlari takip edebilir.
+              </ToneMessage>
+            )}
           </Panel>
 
         </div>
 
-        <Panel className="order-1 space-y-5 xl:order-2">
+        <Panel className="order-1 space-y-5 border-[rgba(217,72,72,0.28)] bg-[linear-gradient(145deg,rgba(255,247,247,0.94),rgba(255,255,255,0.9),rgba(246,241,255,0.78))] shadow-[0_22px_48px_rgba(217,72,72,0.12)] xl:order-2">
           <SectionHeader
             title="Etkinlikler"
-            description="Bu listedeki bir kayda tikladigimizda detay popup olarak acilir."
+            description="En cok ilgi goren etkinlik ustte buyuk gorunur. Diger etkinlikleri de asagida daha net ayiriyoruz."
           />
 
-          {activeEvents.length ? (
-            <div className="grid gap-3">
-              {activeEvents.map((event) => {
-                const isSelected = event.id === selectedEventId;
+          {rankedActiveEvents.length ? (
+            <div className="grid gap-4">
+              {featuredActiveEvent ? (
+                <TrainingEventCard
+                  event={featuredActiveEvent}
+                  summary={eventResponseSummaries[featuredActiveEvent.id]}
+                  selected={featuredActiveEvent.id === selectedEventId}
+                  featured
+                  onClick={() => {
+                    setSelectedEventId(featuredActiveEvent.id);
+                    setIsEventDetailOpen(true);
+                  }}
+                />
+              ) : null}
 
-                return (
-                  <button
-                    key={event.id}
-                    type="button"
-                    onClick={() => {
-                      setSelectedEventId(event.id);
-                      setIsEventDetailOpen(true);
-                    }}
-                    className={cx(
-                      "rounded-[26px] border p-4 text-left transition duration-200",
-                      isSelected
-                        ? "border-[rgba(141,106,232,0.18)] bg-[linear-gradient(145deg,rgba(255,241,248,0.96),rgba(246,241,255,0.92),rgba(242,251,245,0.9))] shadow-[0_18px_38px_rgba(141,106,232,0.12)]"
-                        : "border-[rgba(141,106,232,0.1)] bg-white/68 hover:-translate-y-0.5 hover:bg-white/84",
-                    )}
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="space-y-2">
-                        <EventTypeBadge
-                          label={getTrainingPlanEventTypeLabel(event.eventType)}
-                          locked={event.isLocked}
-                        />
-                        <strong className="block text-base text-[#182127]">
-                          {event.title}
-                        </strong>
-                      </div>
-                      <span className="text-xs font-medium text-[#6d7a83]">
-                        {formatDateTime(event.createdAt)}
-                      </span>
-                    </div>
-
-                    <p className="mt-3 text-sm leading-6 text-[#5f6d76]">
-                      {event.isLocked && event.lockedDay && event.lockedHour
-                        ? `${event.lockedDay} / ${formatTrainingPlanHourRange(event.lockedHour)}`
-                        : `${Object.keys(event.possibleSlots).length} gun, ${countTrainingPlanSelectedSlots(event.possibleSlots)} farkli saat secenegiyle oylaniyor.`}
-                    </p>
-                  </button>
-                );
-              })}
+              {remainingActiveEvents.length ? (
+                <div className="grid gap-3">
+                  {remainingActiveEvents.map((event) => (
+                    <TrainingEventCard
+                      key={event.id}
+                      event={event}
+                      summary={eventResponseSummaries[event.id]}
+                      selected={event.id === selectedEventId}
+                      onClick={() => {
+                        setSelectedEventId(event.id);
+                        setIsEventDetailOpen(true);
+                      }}
+                    />
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : (
             <EmptyState
@@ -1638,45 +1702,18 @@ export function TrainingPlanPage() {
           pastEvents.length ? (
             <div className="grid gap-3">
             {pastEvents.map((event) => {
-              const isSelected = event.id === selectedEventId;
-
               return (
-                <button
+                <TrainingEventCard
                   key={event.id}
-                  type="button"
+                  event={event}
+                  summary={eventResponseSummaries[event.id]}
+                  selected={event.id === selectedEventId}
                   onClick={() => {
                     setSelectedEventId(event.id);
                     setIsEventDetailOpen(true);
                   }}
-                  className={cx(
-                    "rounded-[26px] border p-4 text-left transition duration-200",
-                    isSelected
-                      ? "border-[rgba(141,106,232,0.18)] bg-[linear-gradient(145deg,rgba(255,241,248,0.96),rgba(246,241,255,0.92),rgba(242,251,245,0.9))] shadow-[0_18px_38px_rgba(141,106,232,0.12)]"
-                      : "border-[rgba(141,106,232,0.1)] bg-white/68 hover:-translate-y-0.5 hover:bg-white/84",
-                  )}
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="space-y-2">
-                      <EventTypeBadge
-                        label={getTrainingPlanEventTypeLabel(event.eventType)}
-                        locked={event.isLocked}
-                      />
-                      <strong className="block text-base text-[#182127]">
-                        {event.title}
-                      </strong>
-                    </div>
-                    <span className="text-xs font-medium text-[#6d7a83]">
-                      {formatDateTime(event.createdAt)}
-                    </span>
-                  </div>
-
-                    <p className="mt-3 text-sm leading-6 text-[#5f6d76]">
-                      {event.isLocked && event.lockedDay && event.lockedHour
-                        ? `${event.lockedDay} / ${formatTrainingPlanHourRange(event.lockedHour)}`
-                        : `${Object.keys(event.possibleSlots).length} gun, ${countTrainingPlanSelectedSlots(event.possibleSlots)} farkli saat secenegiyle oylaniyor.`}
-                    </p>
-                  </button>
-                );
+                />
+              );
             })}
             </div>
           ) : (
@@ -1695,6 +1732,16 @@ export function TrainingPlanPage() {
           className="sm:max-w-6xl"
         >
           {eventDetailContent}
+        </ModalShell>
+      ) : null}
+
+      {isCreateEventOpen ? (
+        <ModalShell
+          title="Etkinlik olustur"
+          onClose={() => setIsCreateEventOpen(false)}
+          className="sm:max-w-5xl"
+        >
+          {createEventContent}
         </ModalShell>
       ) : null}
 
@@ -2167,6 +2214,108 @@ function ParticipantGroup({
         ))}
       </div>
     </div>
+  );
+}
+
+function TrainingEventCard({
+  event,
+  summary,
+  selected,
+  onClick,
+  featured = false,
+}: {
+  event: TrainingPlanEvent;
+  summary?: { total: number; yes: number; maybe: number; no: number };
+  selected: boolean;
+  onClick: () => void;
+  featured?: boolean;
+}) {
+  const totalVotes = summary?.total ?? 0;
+  const positiveVotes = (summary?.yes ?? 0) + (summary?.maybe ?? 0);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cx(
+        "relative overflow-hidden rounded-[26px] border p-4 text-left transition duration-200",
+        featured ? "p-5 sm:p-6" : "",
+        selected
+          ? "border-[rgba(141,106,232,0.18)] bg-[linear-gradient(145deg,rgba(255,241,248,0.96),rgba(246,241,255,0.92),rgba(242,251,245,0.9))] shadow-[0_18px_38px_rgba(141,106,232,0.12)]"
+          : featured
+            ? "border-[rgba(217,72,72,0.22)] bg-[linear-gradient(145deg,rgba(255,245,246,0.96),rgba(255,255,255,0.94),rgba(246,241,255,0.88))] shadow-[0_24px_44px_rgba(217,72,72,0.12)] hover:-translate-y-0.5"
+            : "border-[rgba(141,106,232,0.1)] bg-white/74 hover:-translate-y-0.5 hover:bg-white/88",
+      )}
+    >
+      <div
+        className={cx(
+          "pointer-events-none absolute inset-y-0 left-0 w-1.5 rounded-l-[26px]",
+          featured
+            ? "bg-[linear-gradient(180deg,#ef4444,#f97316)]"
+            : "bg-[linear-gradient(180deg,rgba(217,106,167,0.72),rgba(141,106,232,0.72))]",
+        )}
+      />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <EventTypeBadge
+              label={getTrainingPlanEventTypeLabel(event.eventType)}
+              locked={event.isLocked}
+            />
+            {featured ? (
+              <span className="inline-flex items-center rounded-full border border-[rgba(239,68,68,0.16)] bg-[rgba(255,239,239,0.96)] px-3 py-1 text-[11px] font-bold uppercase tracking-[0.16em] text-[#d94848]">
+                Guncel oylama
+              </span>
+            ) : null}
+          </div>
+
+          <div className="space-y-1">
+            <strong
+              className={cx(
+                "block text-[#182127]",
+                featured ? "text-xl sm:text-2xl" : "text-base",
+              )}
+            >
+              {event.title}
+            </strong>
+            <p className="text-sm leading-6 text-[#5f6d76]">
+              {event.isLocked && event.lockedDay && event.lockedHour
+                ? `${event.lockedDay} / ${formatTrainingPlanHourRange(event.lockedHour)}`
+                : `${Object.keys(event.possibleSlots).length} gun, ${countTrainingPlanSelectedSlots(event.possibleSlots)} farkli saat secenegiyle oylaniyor.`}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-col items-end gap-2">
+          <span className="text-xs font-medium text-[#6d7a83]">
+            {formatDateTime(event.createdAt)}
+          </span>
+          <div className="rounded-[20px] border border-[rgba(141,106,232,0.14)] bg-white/82 px-4 py-3 text-right shadow-[0_14px_28px_rgba(141,106,232,0.08)]">
+            <strong className={cx("block text-[#182127]", featured ? "text-2xl" : "text-xl")}>
+              {totalVotes}
+            </strong>
+            <span className="block text-xs font-semibold uppercase tracking-[0.14em] text-[#8d6ae8]">
+              Oy veren
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <span className="inline-flex items-center rounded-full border border-[rgba(88,183,131,0.16)] bg-[rgba(238,251,242,0.92)] px-3 py-1 text-xs font-semibold text-[#2f8f5c]">
+          Geliyorum {summary?.yes ?? 0}
+        </span>
+        <span className="inline-flex items-center rounded-full border border-[rgba(141,106,232,0.16)] bg-[rgba(246,241,255,0.92)] px-3 py-1 text-xs font-semibold text-[#7b58d3]">
+          Belki {summary?.maybe ?? 0}
+        </span>
+        <span className="inline-flex items-center rounded-full border border-[rgba(217,106,167,0.16)] bg-[rgba(255,241,248,0.92)] px-3 py-1 text-xs font-semibold text-[#cf4c8a]">
+          Gelemiyorum {summary?.no ?? 0}
+        </span>
+        <span className="inline-flex items-center rounded-full border border-[rgba(24,33,39,0.08)] bg-white/80 px-3 py-1 text-xs font-semibold text-[#5f6d76]">
+          Aktif ilgi {positiveVotes}
+        </span>
+      </div>
+    </button>
   );
 }
 

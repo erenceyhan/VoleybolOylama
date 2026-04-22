@@ -1464,6 +1464,47 @@ export async function fetchTrainingPlanResponses(eventId: string) {
   );
 }
 
+export async function fetchTrainingPlanResponseSummaries() {
+  const client = requireSupabase();
+  await ensureActiveSession(client);
+
+  const { data, error } = await client
+    .from("training_plan_responses")
+    .select("event_id, status");
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return ((data ?? []) as Array<{
+    event_id: string;
+    status: TrainingPlanResponse["status"];
+  }>).reduce<Record<string, { total: number; yes: number; maybe: number; no: number }>>(
+    (accumulator, row) => {
+      const current = accumulator[row.event_id] ?? {
+        total: 0,
+        yes: 0,
+        maybe: 0,
+        no: 0,
+      };
+
+      current.total += 1;
+
+      if (row.status === "yes") {
+        current.yes += 1;
+      } else if (row.status === "maybe") {
+        current.maybe += 1;
+      } else {
+        current.no += 1;
+      }
+
+      accumulator[row.event_id] = current;
+      return accumulator;
+    },
+    {},
+  );
+}
+
 export async function upsertTrainingPlanResponse(
   input: TrainingPlanResponseInput,
 ) {
