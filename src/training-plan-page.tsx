@@ -1635,6 +1635,7 @@ export function TrainingPlanPage() {
         <Panel className="order-1 space-y-5 border-[rgba(217,72,72,0.28)] bg-[linear-gradient(145deg,rgba(255,247,247,0.94),rgba(255,255,255,0.9),rgba(246,241,255,0.78))] shadow-[0_22px_48px_rgba(217,72,72,0.12)] xl:order-2">
           <SectionHeader
             title="Etkinlikler"
+            description="Bu listedeki bir kayda tikladigimizda detay popup olarak acilir."
           />
 
           {rankedActiveEvents.length ? (
