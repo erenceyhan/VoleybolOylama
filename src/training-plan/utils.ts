@@ -1,5 +1,6 @@
 import type {
   TrainingPlanBestSlot,
+  TrainingPlanDaySlotMap,
   TrainingPlanEventType,
   TrainingPlanMatchSource,
   TrainingPlanResponse,
@@ -48,6 +49,108 @@ export function sortTrainingPlanDays(days: string[]) {
 
 export function sortTrainingPlanHours(hours: string[]) {
   return [...hours].sort(compareTrainingPlanHours);
+}
+
+export function getUniqueTrainingPlanHours(slotMap: TrainingPlanDaySlotMap) {
+  const allHours = Object.values(slotMap).flatMap((hours) => hours);
+  return sortTrainingPlanHours([...new Set(allHours)]);
+}
+
+export function normalizeTrainingPlanSlotMap(
+  slotMap: TrainingPlanDaySlotMap | null | undefined,
+) {
+  if (!slotMap || typeof slotMap !== "object") {
+    return {} as TrainingPlanDaySlotMap;
+  }
+
+  return Object.fromEntries(
+    sortTrainingPlanDays(Object.keys(slotMap))
+      .map((day) => {
+        const rawHours = Array.isArray(slotMap[day]) ? slotMap[day] : [];
+        const nextHours = sortTrainingPlanHours(
+          rawHours.filter((hour) => TRAINING_PLAN_HOURS.includes(hour as never)),
+        );
+
+        if (!TRAINING_PLAN_DAYS.includes(day as never)) {
+          return null;
+        }
+
+        return [day, [...new Set(nextHours)]];
+      })
+      .filter((entry): entry is [string, string[]] => Boolean(entry)),
+  );
+}
+
+export function buildTrainingPlanSlotMapFromLegacy(input: {
+  possibleDays: string[];
+  possibleHours: string[];
+}) {
+  const normalizedDays = sortTrainingPlanDays(input.possibleDays);
+  const normalizedHours = sortTrainingPlanHours(input.possibleHours);
+
+  return Object.fromEntries(
+    normalizedDays.map((day) => [day, normalizedHours]),
+  ) satisfies TrainingPlanDaySlotMap;
+}
+
+export function toggleTrainingPlanSlotHour(
+  slotMap: TrainingPlanDaySlotMap,
+  day: string,
+  hour: string,
+) {
+  const nextMap = { ...slotMap };
+  const currentHours = new Set(nextMap[day] ?? []);
+
+  if (currentHours.has(hour)) {
+    currentHours.delete(hour);
+  } else {
+    currentHours.add(hour);
+  }
+
+  const nextHours = sortTrainingPlanHours([...currentHours]);
+
+  nextMap[day] = nextHours;
+
+  return normalizeTrainingPlanSlotMap(nextMap);
+}
+
+export function toggleTrainingPlanSlotDay(
+  slotMap: TrainingPlanDaySlotMap,
+  day: string,
+) {
+  const nextMap = { ...slotMap };
+
+  if (day in nextMap) {
+    delete nextMap[day];
+  } else {
+    nextMap[day] = [];
+  }
+
+  return normalizeTrainingPlanSlotMap(nextMap);
+}
+
+export function countTrainingPlanSelectedSlots(slotMap: TrainingPlanDaySlotMap) {
+  return Object.values(slotMap).reduce((total, hours) => total + hours.length, 0);
+}
+
+export function hasTrainingPlanEmptyDay(slotMap: TrainingPlanDaySlotMap) {
+  return Object.values(normalizeTrainingPlanSlotMap(slotMap)).some(
+    (hours) => hours.length === 0,
+  );
+}
+
+export function formatTrainingPlanSlotMap(slotMap: TrainingPlanDaySlotMap) {
+  const normalizedMap = normalizeTrainingPlanSlotMap(slotMap);
+  const entries = Object.entries(normalizedMap);
+
+  if (entries.length === 0) {
+    return "";
+  }
+
+  return entries
+    .filter(([, hours]) => hours.length > 0)
+    .map(([day, hours]) => `${day}: ${sortTrainingPlanHours(hours).join(", ")}`)
+    .join(" / ");
 }
 
 export function getTrainingPlanEventTypeLabel(eventType: TrainingPlanEventType) {
@@ -119,12 +222,19 @@ export function computeTrainingPlanBestSlot(input: {
   responses: TrainingPlanResponse[];
   possibleDays: string[];
   possibleHours: string[];
+  possibleSlots?: TrainingPlanDaySlotMap;
 }): TrainingPlanBestSlot | null {
   const { responses } = input;
-  const possibleDays = sortTrainingPlanDays(input.possibleDays);
-  const possibleHours = sortTrainingPlanHours(input.possibleHours);
+  const possibleSlots = normalizeTrainingPlanSlotMap(
+    input.possibleSlots ??
+      buildTrainingPlanSlotMapFromLegacy({
+        possibleDays: input.possibleDays,
+        possibleHours: input.possibleHours,
+      }),
+  );
+  const possibleDays = Object.keys(possibleSlots);
 
-  if (possibleDays.length === 0 || possibleHours.length === 0) {
+  if (possibleDays.length === 0) {
     return null;
   }
 
@@ -132,15 +242,14 @@ export function computeTrainingPlanBestSlot(input: {
   let bestScore: TrainingPlanSlotScore | null = null;
 
   for (const day of possibleDays) {
-    for (const hour of possibleHours) {
+    for (const hour of possibleSlots[day] ?? []) {
       let score = 0;
       let participantCount = 0;
 
       for (const response of responses) {
-        const daySelected = response.selectedDays.includes(day);
-        const hourSelected = response.selectedHours.includes(hour);
+        const selectedHoursForDay = response.selectedSlots?.[day] ?? [];
 
-        if (!daySelected || !hourSelected) {
+        if (!selectedHoursForDay.includes(hour)) {
           continue;
         }
 

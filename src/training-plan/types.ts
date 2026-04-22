@@ -21,6 +21,8 @@ export type TrainingPlanEventType = "training" | "match";
 export type TrainingPlanResponseStatus = "yes" | "maybe" | "no";
 export type TrainingPlanMatchSource = "amator" | "voleyboloyna";
 
+export type TrainingPlanDaySlotMap = Record<string, string[]>;
+
 export type TrainingSchoolLink = {
   id: string;
   name: string;
@@ -39,6 +41,7 @@ export type TrainingPlanEvent = {
   createdBy: string;
   possibleDays: string[];
   possibleHours: string[];
+  possibleSlots: TrainingPlanDaySlotMap;
   isLocked: boolean;
   lockedDay: string | null;
   lockedHour: string | null;
@@ -54,6 +57,7 @@ export type TrainingPlanResponse = {
   status: TrainingPlanResponseStatus;
   selectedDays: string[];
   selectedHours: string[];
+  selectedSlots: TrainingPlanDaySlotMap;
   note: string;
   updatedAt: string;
 };
@@ -66,6 +70,7 @@ export type TrainingPlanEventInput = {
   eventType: TrainingPlanEventType;
   possibleDays: string[];
   possibleHours: string[];
+  possibleSlots: TrainingPlanDaySlotMap;
   isLocked: boolean;
   lockedDay: string | null;
   lockedHour: string | null;
@@ -84,6 +89,7 @@ export type TrainingPlanResponseInput = {
   status: TrainingPlanResponseStatus;
   selectedDays: string[];
   selectedHours: string[];
+  selectedSlots: TrainingPlanDaySlotMap;
   note: string;
 };
 

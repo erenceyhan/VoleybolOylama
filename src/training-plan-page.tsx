@@ -19,6 +19,7 @@ import {
 import { hasSupabaseConfig } from "./supabaseClient";
 import type {
   TrainingPlanBestSlot,
+  TrainingPlanDaySlotMap,
   TrainingPlanEvent,
   TrainingPlanEventType,
   TrainingPlanMatchSource,
@@ -29,6 +30,10 @@ import type {
 } from "./training-plan/types";
 import { TRAINING_PLAN_DAYS, TRAINING_PLAN_HOURS } from "./training-plan/types";
 import {
+  countTrainingPlanSelectedSlots,
+  formatTrainingPlanSlotMap,
+  getUniqueTrainingPlanHours,
+  hasTrainingPlanEmptyDay,
   buildTrainingPlanEventTitle,
   compareTrainingPlanDays,
   compareTrainingPlanHours,
@@ -38,11 +43,13 @@ import {
   formatTrainingPlanHourRange,
   getTrainingPlanNextDate,
   getTrainingPlanEventTypeLabel,
-  getTrainingPlanMatchSourceLabel,
   getTrainingPlanStatusLabel,
+  normalizeTrainingPlanSlotMap,
   normalizeTrainingPlanLink,
   sortTrainingPlanDays,
   sortTrainingPlanHours,
+  toggleTrainingPlanSlotDay,
+  toggleTrainingPlanSlotHour,
 } from "./training-plan/utils";
 import type { Member } from "./types";
 import {
@@ -119,8 +126,10 @@ function resolveEventCutoffDateTime(event: TrainingPlanEvent) {
     return null;
   }
 
-  const lastDay = sortTrainingPlanDays(event.possibleDays).at(-1) ?? null;
-  const lastHour = sortTrainingPlanHours(event.possibleHours).at(-1) ?? null;
+  const lastDay = sortTrainingPlanDays(Object.keys(event.possibleSlots)).at(-1) ?? null;
+  const lastHour = lastDay
+    ? sortTrainingPlanHours(event.possibleSlots[lastDay] ?? []).at(-1) ?? null
+    : null;
 
   return resolveEventDateTime(lastDay, lastHour, event.createdAt);
 }
@@ -145,6 +154,10 @@ export function TrainingPlanPage() {
   const [pageError, setPageError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  const [responseActionError, setResponseActionError] = useState<string | null>(null);
+  const [responseActionSuccess, setResponseActionSuccess] = useState<string | null>(
+    null,
+  );
   const [isBooting, setIsBooting] = useState(true);
   const [isResponsesLoading, setIsResponsesLoading] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
@@ -167,8 +180,7 @@ export function TrainingPlanPage() {
   const [createDescription, setCreateDescription] = useState("");
   const [createType, setCreateType] =
     useState<TrainingPlanEventType>("training");
-  const [createDays, setCreateDays] = useState<string[]>([]);
-  const [createHours, setCreateHours] = useState<string[]>([]);
+  const [createSlots, setCreateSlots] = useState<TrainingPlanDaySlotMap>({});
   const [createMatchDay, setCreateMatchDay] = useState<string>(
     TRAINING_PLAN_DAYS[0],
   );
@@ -187,8 +199,7 @@ export function TrainingPlanPage() {
 
   const [responseStatus, setResponseStatus] =
     useState<TrainingPlanResponseStatus>("yes");
-  const [responseDays, setResponseDays] = useState<string[]>([]);
-  const [responseHours, setResponseHours] = useState<string[]>([]);
+  const [responseSlots, setResponseSlots] = useState<TrainingPlanDaySlotMap>({});
   const [responseNote, setResponseNote] = useState("");
 
   const selectedEvent = useMemo(
@@ -209,16 +220,12 @@ export function TrainingPlanPage() {
       responses,
       possibleDays: selectedEvent.possibleDays,
       possibleHours: selectedEvent.possibleHours,
+      possibleSlots: selectedEvent.possibleSlots,
     });
   }, [responses, selectedEvent]);
 
   const sortedPossibleDays = useMemo(
-    () => sortTrainingPlanDays(selectedEvent?.possibleDays ?? []),
-    [selectedEvent],
-  );
-
-  const sortedPossibleHours = useMemo(
-    () => sortTrainingPlanHours(selectedEvent?.possibleHours ?? []),
+    () => sortTrainingPlanDays(Object.keys(selectedEvent?.possibleSlots ?? {})),
     [selectedEvent],
   );
 
@@ -243,16 +250,13 @@ export function TrainingPlanPage() {
 
     return sortedPossibleDays
       .flatMap((day) =>
-        sortedPossibleHours.map((hour) => {
+        (selectedEvent.possibleSlots[day] ?? []).map((hour) => {
           const voters = responses.filter((response) => {
             if (response.status === "no") {
               return false;
             }
 
-            return (
-              response.selectedDays.includes(day) &&
-              response.selectedHours.includes(hour)
-            );
+            return (response.selectedSlots?.[day] ?? []).includes(hour);
           });
 
           const score = voters.reduce((total, response) => {
@@ -286,7 +290,7 @@ export function TrainingPlanPage() {
 
         return compareTrainingPlanHours(left.hour, right.hour);
       });
-  }, [responses, selectedEvent, sortedPossibleDays, sortedPossibleHours]);
+  }, [responses, selectedEvent, sortedPossibleDays]);
 
   const isAdmin = currentMember?.role === "admin";
   const pastEvents = useMemo(() => {
@@ -337,21 +341,10 @@ export function TrainingPlanPage() {
 
     return buildTrainingPlanWhatsappMessage({
       event: selectedEvent,
-      bestSlot,
-      yesResponses: groupedResponses.yes,
-      maybeResponses: groupedResponses.maybe,
       nonVoters,
       detailUrl: buildTrainingPlanShareUrl(selectedEvent.id),
-      matchLink: selectedEventMatchLink,
     });
-  }, [
-    bestSlot,
-    groupedResponses.maybe,
-    groupedResponses.yes,
-    nonVoters,
-    selectedEvent,
-    selectedEventMatchLink,
-  ]);
+  }, [nonVoters, selectedEvent]);
 
   useEffect(() => {
     let isActive = true;
@@ -531,24 +524,25 @@ export function TrainingPlanPage() {
 
     if (existingResponse) {
       setResponseStatus(existingResponse.status);
-      setResponseDays(existingResponse.selectedDays);
-      setResponseHours(existingResponse.selectedHours);
+      setResponseSlots(existingResponse.selectedSlots);
       setResponseNote(existingResponse.note);
+      setResponseActionError(null);
+      setResponseActionSuccess(null);
       return;
     }
 
     setResponseStatus("yes");
-    setResponseDays(selectedEvent.isLocked ? [] : sortedPossibleDays);
-    setResponseHours(selectedEvent.isLocked ? [] : sortedPossibleHours);
+    setResponseSlots({});
     setResponseNote("");
-  }, [currentMember, responses, selectedEvent, sortedPossibleDays, sortedPossibleHours]);
+    setResponseActionError(null);
+    setResponseActionSuccess(null);
+  }, [currentMember, responses, selectedEvent]);
 
   function clearCreateForm() {
     setCreateTitle("");
     setCreateDescription("");
     setCreateType("training");
-    setCreateDays([]);
-    setCreateHours([]);
+    setCreateSlots({});
     setCreateMatchDay(TRAINING_PLAN_DAYS[0]);
     setCreateMatchHour(TRAINING_PLAN_HOURS[3]);
     setCreateMatchSource("amator");
@@ -585,13 +579,21 @@ export function TrainingPlanPage() {
     setActionError(null);
     setActionSuccess(null);
 
-    if (createType === "training" && createDays.length === 0) {
+    if (createType === "training" && Object.keys(createSlots).length === 0) {
       setActionError("Antrenman icin en az bir gun secmeliyiz.");
       return;
     }
 
-    if (createType === "training" && createHours.length === 0) {
-      setActionError("Antrenman icin en az bir saat secmeliyiz.");
+    if (
+      createType === "training" &&
+      countTrainingPlanSelectedSlots(createSlots) === 0
+    ) {
+      setActionError("Antrenman icin secilen gunlere en az bir saat vermeliyiz.");
+      return;
+    }
+
+    if (createType === "training" && hasTrainingPlanEmptyDay(createSlots)) {
+      setActionError("Sectigimiz her gun icin en az bir saat belirlemeliyiz.");
       return;
     }
 
@@ -630,9 +632,13 @@ export function TrainingPlanPage() {
         matchSource: createMatchSource,
         eventType: createType,
         possibleDays:
-          createType === "training" ? sortTrainingPlanDays(createDays) : [],
+          createType === "training" ? sortTrainingPlanDays(Object.keys(createSlots)) : [],
         possibleHours:
-          createType === "training" ? sortTrainingPlanHours(createHours) : [],
+          createType === "training" ? getUniqueTrainingPlanHours(createSlots) : [],
+        possibleSlots:
+          createType === "training"
+            ? normalizeTrainingPlanSlotMap(createSlots)
+            : {},
         isLocked: createType === "match",
         lockedDay: createType === "match" ? createMatchDay : null,
         lockedHour: createType === "match" ? createMatchHour : null,
@@ -712,18 +718,27 @@ export function TrainingPlanPage() {
 
     setActionError(null);
     setActionSuccess(null);
+    setResponseActionError(null);
+    setResponseActionSuccess(null);
 
     const shouldPickSlots =
       !selectedEvent.isLocked &&
       (responseStatus === "yes" || responseStatus === "maybe");
 
-    if (shouldPickSlots && responseDays.length === 0) {
-      setActionError("Katilim durumunda en az bir gun secmeliyiz.");
+    if (shouldPickSlots && Object.keys(responseSlots).length === 0) {
+      setResponseActionError("Geliyorum ya da Belki seciminde en az bir gun secmelisin.");
       return;
     }
 
-    if (shouldPickSlots && responseHours.length === 0) {
-      setActionError("Katilim durumunda en az bir saat secmeliyiz.");
+    if (shouldPickSlots && countTrainingPlanSelectedSlots(responseSlots) === 0) {
+      setResponseActionError(
+        "Sectigin gunler icin en az bir saat secmeden kaydedemeyiz.",
+      );
+      return;
+    }
+
+    if (shouldPickSlots && hasTrainingPlanEmptyDay(responseSlots)) {
+      setResponseActionError("Sectigin her gun icin en az bir saat secmelisin.");
       return;
     }
 
@@ -733,20 +748,21 @@ export function TrainingPlanPage() {
       await upsertTrainingPlanResponse({
         eventId: selectedEvent.id,
         status: responseStatus,
-        selectedDays: shouldPickSlots ? sortTrainingPlanDays(responseDays) : [],
-        selectedHours: shouldPickSlots ? sortTrainingPlanHours(responseHours) : [],
+        selectedDays: shouldPickSlots ? sortTrainingPlanDays(Object.keys(responseSlots)) : [],
+        selectedHours: shouldPickSlots ? getUniqueTrainingPlanHours(responseSlots) : [],
+        selectedSlots: shouldPickSlots ? normalizeTrainingPlanSlotMap(responseSlots) : {},
         note: responseNote,
       });
 
       await refreshResponses(selectedEvent.id);
-      setActionSuccess("Katilim tercihin kaydedildi.");
+      setResponseActionSuccess("Katilim tercihin kaydedildi.");
     } catch (error) {
       if (isSessionTimeoutError(error)) {
         redirectToTimeout(router);
         return;
       }
 
-      setActionError(
+      setResponseActionError(
         getErrorMessage(error, "Katilim tercihi kaydedilemedi."),
       );
     } finally {
@@ -885,13 +901,13 @@ export function TrainingPlanPage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <strong className="text-lg text-[#182127]">Katilim secimin</strong>
               <InlineMeta>
-                <span>
-                  {selectedEvent.isLocked
-                    ? "Sabit tarih"
-                    : `${selectedEvent.possibleDays.length} gun / ${selectedEvent.possibleHours.length} saat`}
-                </span>
-              </InlineMeta>
-            </div>
+                  <span>
+                    {selectedEvent.isLocked
+                      ? "Sabit tarih"
+                      : `${Object.keys(selectedEvent.possibleSlots).length} gun / ${countTrainingPlanSelectedSlots(selectedEvent.possibleSlots)} saat`}
+                  </span>
+                </InlineMeta>
+              </div>
 
             {selectedEvent.isLocked &&
             selectedEvent.lockedDay &&
@@ -927,26 +943,30 @@ export function TrainingPlanPage() {
                 <FieldBlock label="Uygun gunler">
                   <ChipGrid
                     values={sortedPossibleDays}
-                    selectedValues={responseDays}
+                    selectedValues={sortTrainingPlanDays(Object.keys(responseSlots))}
                     onToggle={(value) =>
-                      setResponseDays((current) =>
-                        toggleArrayValue(current, value),
+                      setResponseSlots((current) =>
+                        toggleTrainingPlanSlotDay(current, value),
                       )
                     }
                   />
                 </FieldBlock>
 
-                <FieldBlock label="Uygun saatler">
-                  <ChipGrid
-                    values={sortedPossibleHours}
-                    selectedValues={responseHours}
-                    onToggle={(value) =>
-                      setResponseHours((current) =>
-                        toggleArrayValue(current, value),
-                      )
-                    }
-                  />
-                </FieldBlock>
+                {sortTrainingPlanDays(Object.keys(responseSlots)).length > 0 ? (
+                  <FieldBlock label="Gunlere gore uygun saatler">
+                    <DaySlotSelector
+                      availableDays={sortTrainingPlanDays(Object.keys(responseSlots))}
+                      hourOptions={[...TRAINING_PLAN_HOURS]}
+                      allowedSlots={selectedEvent.possibleSlots}
+                      selectedSlots={responseSlots}
+                      onToggleHour={(day, hour) =>
+                        setResponseSlots((current) =>
+                          toggleTrainingPlanSlotHour(current, day, hour),
+                        )
+                      }
+                    />
+                  </FieldBlock>
+                ) : null}
               </>
             ) : null}
 
@@ -958,6 +978,13 @@ export function TrainingPlanPage() {
                 placeholder="Gerekirse kisa bir not ekleyebilirsin."
               />
             </FieldBlock>
+
+            {responseActionError ? (
+              <ToneMessage tone="error">{responseActionError}</ToneMessage>
+            ) : null}
+            {responseActionSuccess ? (
+              <ToneMessage tone="success">{responseActionSuccess}</ToneMessage>
+            ) : null}
 
             <div className="flex flex-wrap gap-3">
               <PrimaryButton
@@ -1215,24 +1242,31 @@ export function TrainingPlanPage() {
                 {createType === "training" ? (
                   <>
                     <FieldBlock label="Gunler">
-                        <ChipGrid
-                          values={[...TRAINING_PLAN_DAYS]}
-                          selectedValues={createDays}
-                          onToggle={(value) =>
-                            setCreateDays((current) => toggleArrayValue(current, value))
-                          }
-                        />
+                      <ChipGrid
+                        values={[...TRAINING_PLAN_DAYS]}
+                        selectedValues={sortTrainingPlanDays(Object.keys(createSlots))}
+                        onToggle={(value) =>
+                          setCreateSlots((current) =>
+                            toggleTrainingPlanSlotDay(current, value),
+                          )
+                        }
+                      />
                     </FieldBlock>
 
-                    <FieldBlock label="Saatler">
-                        <ChipGrid
-                          values={[...TRAINING_PLAN_HOURS]}
-                          selectedValues={createHours}
-                          onToggle={(value) =>
-                            setCreateHours((current) => toggleArrayValue(current, value))
+                    {sortTrainingPlanDays(Object.keys(createSlots)).length > 0 ? (
+                      <FieldBlock label="Gun bazli saatler">
+                        <DaySlotSelector
+                          availableDays={sortTrainingPlanDays(Object.keys(createSlots))}
+                          hourOptions={[...TRAINING_PLAN_HOURS]}
+                          selectedSlots={createSlots}
+                          onToggleHour={(day, hour) =>
+                            setCreateSlots((current) =>
+                              toggleTrainingPlanSlotHour(current, day, hour),
+                            )
                           }
                         />
-                    </FieldBlock>
+                      </FieldBlock>
+                    ) : null}
 
                     <SoftCard className="space-y-4">
                       <div className="space-y-1">
@@ -1566,7 +1600,7 @@ export function TrainingPlanPage() {
                     <p className="mt-3 text-sm leading-6 text-[#5f6d76]">
                       {event.isLocked && event.lockedDay && event.lockedHour
                         ? `${event.lockedDay} / ${formatTrainingPlanHourRange(event.lockedHour)}`
-                        : `${event.possibleDays.length} gun, ${event.possibleHours.length} saat araliginda oylaniyor.`}
+                        : `${Object.keys(event.possibleSlots).length} gun, ${countTrainingPlanSelectedSlots(event.possibleSlots)} farkli saat secenegiyle oylaniyor.`}
                     </p>
                   </button>
                 );
@@ -1636,13 +1670,13 @@ export function TrainingPlanPage() {
                     </span>
                   </div>
 
-                  <p className="mt-3 text-sm leading-6 text-[#5f6d76]">
-                    {event.isLocked && event.lockedDay && event.lockedHour
-                      ? `${event.lockedDay} / ${formatTrainingPlanHourRange(event.lockedHour)}`
-                      : `${event.possibleDays.length} gun, ${event.possibleHours.length} saat araliginda oylaniyor.`}
-                  </p>
-                </button>
-              );
+                    <p className="mt-3 text-sm leading-6 text-[#5f6d76]">
+                      {event.isLocked && event.lockedDay && event.lockedHour
+                        ? `${event.lockedDay} / ${formatTrainingPlanHourRange(event.lockedHour)}`
+                        : `${Object.keys(event.possibleSlots).length} gun, ${countTrainingPlanSelectedSlots(event.possibleSlots)} farkli saat secenegiyle oylaniyor.`}
+                    </p>
+                  </button>
+                );
             })}
             </div>
           ) : (
@@ -1921,6 +1955,70 @@ function ChipGrid({
   );
 }
 
+function DaySlotSelector({
+  availableDays,
+  hourOptions,
+  selectedSlots,
+  onToggleHour,
+  allowedSlots,
+}: {
+  availableDays: string[];
+  hourOptions: string[];
+  selectedSlots: TrainingPlanDaySlotMap;
+  onToggleHour: (day: string, hour: string) => void;
+  allowedSlots?: TrainingPlanDaySlotMap;
+}) {
+  return (
+    <div className="grid gap-4">
+      {availableDays.map((day) => {
+        const selectedHours = sortTrainingPlanHours(selectedSlots[day] ?? []);
+        const allowedHours = sortTrainingPlanHours(
+          allowedSlots?.[day] ?? hourOptions,
+        );
+
+        return (
+          <div
+            key={day}
+            className="rounded-[22px] border border-[rgba(141,106,232,0.1)] bg-white/66 p-4"
+          >
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <strong className="text-sm text-[#182127]">{day}</strong>
+              <span className="text-xs text-[#6d7a83]">
+                {selectedHours.length > 0
+                  ? selectedHours.join(", ")
+                  : "Henuz saat secilmedi."}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              {allowedHours.map((hour) => {
+                const active = selectedHours.includes(hour);
+
+                return (
+                  <button
+                    key={`${day}-${hour}`}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => onToggleHour(day, hour)}
+                    className={cx(
+                      "inline-flex items-center rounded-full border px-4 py-2 text-sm font-semibold transition duration-200",
+                      active
+                        ? "border-transparent bg-[linear-gradient(135deg,#d96aa7,#8d6ae8)] text-white shadow-[0_16px_28px_rgba(141,106,232,0.24)]"
+                        : "border-[rgba(141,106,232,0.12)] bg-white/74 text-[#5f6d76] hover:bg-white",
+                    )}
+                  >
+                    {hour}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function StatusChoiceButton({
   label,
   active,
@@ -2054,14 +2152,9 @@ function ParticipantGroup({
               </span>
             </div>
 
-            {(response.selectedDays.length > 0 || response.selectedHours.length > 0) && (
+            {countTrainingPlanSelectedSlots(response.selectedSlots) > 0 && (
               <p className="mt-2 text-xs leading-5 text-[#5f6d76]">
-                {sortTrainingPlanDays(response.selectedDays).join(", ")}
-                {response.selectedDays.length > 0 &&
-                response.selectedHours.length > 0
-                  ? " / "
-                  : ""}
-                {sortTrainingPlanHours(response.selectedHours).join(", ")}
+                {formatTrainingPlanSlotMap(response.selectedSlots)}
               </p>
             )}
 
@@ -2242,89 +2335,28 @@ function buildTrainingPlanShareUrl(eventId: string) {
 
 function buildTrainingPlanWhatsappMessage(input: {
   event: TrainingPlanEvent;
-  bestSlot: TrainingPlanBestSlot | null;
-  yesResponses: TrainingPlanResponse[];
-  maybeResponses: TrainingPlanResponse[];
   nonVoters: Member[];
   detailUrl: string;
-  matchLink: string;
 }) {
-  const {
-    event,
-    bestSlot,
-    yesResponses,
-    maybeResponses,
-    nonVoters,
-    detailUrl,
-    matchLink,
-  } = input;
-  const shareDay = event.isLocked ? event.lockedDay : bestSlot?.day ?? null;
-  const shareHour = event.isLocked ? event.lockedHour : bestSlot?.hour ?? null;
-  const totalAttending = yesResponses.length;
+  const { event, nonVoters, detailUrl } = input;
   const buffer = new StringBuffer();
 
   buffer.writeln(`[${event.title}]`);
-
-  if (shareDay) {
-    buffer.writeln(`Tarih: ${formatTrainingPlanShareDateLabel(shareDay)}`);
-  } else {
-    buffer.writeln("Tarih: Henuz netlesmedi");
-  }
-
-  if (shareHour) {
-    buffer.writeln(`Saat: ${formatTrainingPlanHourRange(shareHour)}`);
-  } else {
-    buffer.writeln("Saat: Oylama devam ediyor");
-  }
-
-  buffer.writeln(`Katilim: ${totalAttending} kisi`);
-
-  if (yesResponses.length) {
-    buffer.writeln();
-    buffer.writeln("Gelecekler:");
-    buffer.writeln(yesResponses.map((response) => `- ${response.memberDisplayName}`).join("\n"));
-  }
-
-  if (maybeResponses.length) {
-    buffer.writeln();
-    buffer.writeln("Belki:");
-    buffer.writeln(maybeResponses.map((response) => `- ${response.memberDisplayName}`).join("\n"));
-  }
+  buffer.writeln();
+  buffer.writeln("Hatirlatma: Henuz oy vermediniz!");
+  buffer.writeln("Musait oldugun gun ve saatleri secmeyi unutma.");
 
   if (nonVoters.length) {
     buffer.writeln();
-    buffer.writeln("Henuz oy vermeyenler:");
+    buffer.writeln("Bekledigimiz arkadaslar:");
     buffer.writeln(nonVoters.map((member) => `- ${member.name}`).join("\n"));
   }
 
-  if (event.eventType === "match" && matchLink) {
-    buffer.writeln();
-    buffer.writeln(
-      event.matchSource === "voleyboloyna"
-        ? "VoleybolOyna excel:"
-        : event.matchSource === "amator"
-          ? "Amator mac programi:"
-          : "Mac linki:",
-    );
-    buffer.writeln(matchLink);
-  }
-
   buffer.writeln();
-  buffer.writeln("Detaylar ve oy verme:");
+  buffer.writeln("Oy vermek icin:");
   buffer.write(detailUrl);
 
   return buffer.toString();
-}
-
-function formatTrainingPlanShareDateLabel(day: string) {
-  const nextDate = getTrainingPlanNextDate(day) ?? new Date();
-  const dateLabel = new Intl.DateTimeFormat("tr-TR", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  }).format(nextDate);
-
-  return `${day} (${dateLabel})`;
 }
 
 function openWhatsAppShare(message: string) {
@@ -2400,10 +2432,4 @@ class StringBuffer {
   toString() {
     return this.parts.join("");
   }
-}
-
-function toggleArrayValue(values: string[], value: string) {
-  return values.includes(value)
-    ? values.filter((entry) => entry !== value)
-    : [...values, value];
 }

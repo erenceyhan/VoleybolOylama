@@ -2,6 +2,7 @@ import { getVirtualEmailForUsername, normalizeUsername } from "./auth";
 import type { RotationConfigPayload } from "./rotations/types";
 import { supabase } from "./supabaseClient";
 import type {
+  TrainingPlanDaySlotMap,
   TrainingPlanEvent,
   TrainingPlanEventInput,
   TrainingPlanResponse,
@@ -10,8 +11,11 @@ import type {
   TrainingPlanSettings,
 } from "./training-plan/types";
 import {
+  buildTrainingPlanSlotMapFromLegacy,
   buildTrainingPlanEventTitle,
+  normalizeTrainingPlanSlotMap,
   normalizeTrainingPlanLink,
+  sortTrainingPlanHours,
 } from "./training-plan/utils";
 import type {
   AppData,
@@ -99,6 +103,7 @@ type TrainingPlanEventRow = {
   created_by: string;
   possible_days: string[] | null;
   possible_hours: string[] | null;
+  possible_slots?: TrainingPlanDaySlotMap | null;
   is_locked: boolean;
   locked_day: string | null;
   locked_hour: string | null;
@@ -126,6 +131,7 @@ type TrainingPlanResponseRow = {
   status: TrainingPlanResponse["status"];
   selected_days: string[] | null;
   selected_hours: string[] | null;
+  selected_slots?: TrainingPlanDaySlotMap | null;
   note: string | null;
   updated_at: string;
   member?: TrainingPlanMemberProfileRow | TrainingPlanMemberProfileRow[] | null;
@@ -302,6 +308,14 @@ function mapMemberActivityLogRow(row: MemberActivityLogRow): MemberActivityLog {
 }
 
 function mapTrainingPlanEventRow(row: TrainingPlanEventRow): TrainingPlanEvent {
+  const possibleSlots = normalizeTrainingPlanSlotMap(
+    row.possible_slots ??
+      buildTrainingPlanSlotMapFromLegacy({
+        possibleDays: row.possible_days ?? [],
+        possibleHours: row.possible_hours ?? [],
+      }),
+  );
+
   return {
     id: row.id,
     title: row.title,
@@ -315,8 +329,11 @@ function mapTrainingPlanEventRow(row: TrainingPlanEventRow): TrainingPlanEvent {
         : null,
     eventType: row.event_type,
     createdBy: row.created_by,
-    possibleDays: row.possible_days ?? [],
-    possibleHours: row.possible_hours ?? [],
+    possibleDays: Object.keys(possibleSlots),
+    possibleHours: sortTrainingPlanHours([
+      ...new Set(Object.values(possibleSlots).flatMap((hours) => hours)),
+    ]),
+    possibleSlots,
     isLocked: row.is_locked,
     lockedDay: row.locked_day,
     lockedHour: row.locked_hour,
@@ -397,6 +414,14 @@ function mapTrainingPlanResponseRow(
     ? row.member[0] ?? null
     : row.member ?? null;
 
+  const selectedSlots = normalizeTrainingPlanSlotMap(
+    row.selected_slots ??
+      buildTrainingPlanSlotMapFromLegacy({
+        possibleDays: row.selected_days ?? [],
+        possibleHours: row.selected_hours ?? [],
+      }),
+  );
+
   return {
     id: row.id,
     eventId: row.event_id,
@@ -404,8 +429,11 @@ function mapTrainingPlanResponseRow(
     memberDisplayName: memberProfile?.display_name ?? "Uye",
     memberUsername: memberProfile?.username ?? null,
     status: row.status,
-    selectedDays: row.selected_days ?? [],
-    selectedHours: row.selected_hours ?? [],
+    selectedDays: Object.keys(selectedSlots),
+    selectedHours: sortTrainingPlanHours([
+      ...new Set(Object.values(selectedSlots).flatMap((hours) => hours)),
+    ]),
+    selectedSlots,
     note: row.note ?? "",
     updatedAt: row.updated_at,
   };
@@ -1207,7 +1235,7 @@ export async function fetchTrainingPlanEvents() {
   const primaryResult = await client
     .from("training_plan_events")
     .select(
-      "id, title, description, match_link, match_source, event_type, created_by, possible_days, possible_hours, is_locked, locked_day, locked_hour, created_at",
+      "id, title, description, match_link, match_source, event_type, created_by, possible_days, possible_hours, possible_slots, is_locked, locked_day, locked_hour, created_at",
     )
     .order("created_at", { ascending: false });
   let data = primaryResult.data as TrainingPlanEventRow[] | null;
@@ -1216,13 +1244,18 @@ export async function fetchTrainingPlanEvents() {
   if (
     error &&
     (isMissingColumnError(error, "match_link") ||
-      isMissingColumnError(error, "match_source"))
+      isMissingColumnError(error, "match_source") ||
+      isMissingColumnError(error, "possible_slots"))
   ) {
+    const fallbackSelect =
+      isMissingColumnError(error, "match_link") ||
+      isMissingColumnError(error, "match_source")
+        ? "id, title, description, event_type, created_by, possible_days, possible_hours, is_locked, locked_day, locked_hour, created_at"
+        : "id, title, description, match_link, match_source, event_type, created_by, possible_days, possible_hours, is_locked, locked_day, locked_hour, created_at";
+
     const fallbackResult = await client
       .from("training_plan_events")
-      .select(
-        "id, title, description, event_type, created_by, possible_days, possible_hours, is_locked, locked_day, locked_hour, created_at",
-      )
+      .select(fallbackSelect)
       .order("created_at", { ascending: false });
 
     data = fallbackResult.data as TrainingPlanEventRow[] | null;
@@ -1263,6 +1296,7 @@ export async function createTrainingPlanEvent(input: TrainingPlanEventInput) {
     created_by: session.user.id,
     possible_days: input.isLocked ? [] : input.possibleDays,
     possible_hours: input.isLocked ? [] : input.possibleHours,
+    possible_slots: input.isLocked ? {} : input.possibleSlots,
     is_locked: input.isLocked,
     locked_day: input.isLocked ? input.lockedDay : null,
     locked_hour: input.isLocked ? input.lockedHour : null,
@@ -1272,7 +1306,7 @@ export async function createTrainingPlanEvent(input: TrainingPlanEventInput) {
     .from("training_plan_events")
     .insert(insertPayload)
     .select(
-      "id, title, description, match_link, match_source, event_type, created_by, possible_days, possible_hours, is_locked, locked_day, locked_hour, created_at",
+      "id, title, description, match_link, match_source, event_type, created_by, possible_days, possible_hours, possible_slots, is_locked, locked_day, locked_hour, created_at",
     )
     .single();
   let data = primaryInsertResult.data as TrainingPlanEventRow | null;
@@ -1281,15 +1315,24 @@ export async function createTrainingPlanEvent(input: TrainingPlanEventInput) {
   if (
     error &&
     (isMissingColumnError(error, "match_link") ||
-      isMissingColumnError(error, "match_source"))
+      isMissingColumnError(error, "match_source") ||
+      isMissingColumnError(error, "possible_slots"))
   ) {
-    if (normalizedMatchLink || input.matchSource === "voleyboloyna") {
+    const isMatchColumnMissing =
+      isMissingColumnError(error, "match_link") ||
+      isMissingColumnError(error, "match_source");
+    const isPossibleSlotsMissing = isMissingColumnError(error, "possible_slots");
+
+    if (
+      (normalizedMatchLink || input.matchSource === "voleyboloyna") &&
+      isMatchColumnMissing
+    ) {
       throw new Error(
         "Mac kaynaklarini kaydetmek icin once training_plan schema guncellemesini bir kez calistirmamiz gerekiyor.",
       );
     }
 
-    const fallbackPayload = {
+    const fallbackPayload: Record<string, unknown> = {
       title: normalizedTitle,
       description: input.description.trim(),
       event_type: input.eventType,
@@ -1301,12 +1344,36 @@ export async function createTrainingPlanEvent(input: TrainingPlanEventInput) {
       locked_hour: input.isLocked ? input.lockedHour : null,
     };
 
+    if (!isMatchColumnMissing) {
+      fallbackPayload.match_link = normalizedMatchLink || null;
+      fallbackPayload.match_source =
+        input.eventType === "match" ? input.matchSource : null;
+    }
+
+    if (!isPossibleSlotsMissing) {
+      fallbackPayload.possible_slots = input.isLocked ? {} : input.possibleSlots;
+    }
+
+    const fallbackSelect = [
+      "id",
+      "title",
+      "description",
+      ...(!isMatchColumnMissing ? ["match_link", "match_source"] : []),
+      "event_type",
+      "created_by",
+      "possible_days",
+      "possible_hours",
+      ...(!isPossibleSlotsMissing ? ["possible_slots"] : []),
+      "is_locked",
+      "locked_day",
+      "locked_hour",
+      "created_at",
+    ].join(", ");
+
     const fallbackResult = await client
       .from("training_plan_events")
       .insert(fallbackPayload)
-      .select(
-        "id, title, description, event_type, created_by, possible_days, possible_hours, is_locked, locked_day, locked_hour, created_at",
-      )
+      .select(fallbackSelect)
       .single();
 
     data = fallbackResult.data as TrainingPlanEventRow | null;
@@ -1326,6 +1393,7 @@ export async function createTrainingPlanEvent(input: TrainingPlanEventInput) {
       status: "yes",
       selected_days: event.isLocked ? [] : event.possibleDays,
       selected_hours: event.isLocked ? [] : event.possibleHours,
+      selected_slots: event.isLocked ? {} : event.possibleSlots,
       note: "",
       updated_at: new Date().toISOString(),
     },
@@ -1334,7 +1402,26 @@ export async function createTrainingPlanEvent(input: TrainingPlanEventInput) {
     },
   );
 
-  if (responseError) {
+  if (responseError && isMissingColumnError(responseError, "selected_slots")) {
+    const fallbackResponse = await client.from("training_plan_responses").upsert(
+      {
+        event_id: event.id,
+        member_id: session.user.id,
+        status: "yes",
+        selected_days: event.isLocked ? [] : event.possibleDays,
+        selected_hours: event.isLocked ? [] : event.possibleHours,
+        note: "",
+        updated_at: new Date().toISOString(),
+      },
+      {
+        onConflict: "event_id,member_id",
+      },
+    );
+
+    if (fallbackResponse.error) {
+      throw new Error(fallbackResponse.error.message);
+    }
+  } else if (responseError) {
     throw new Error(responseError.message);
   }
 
@@ -1345,13 +1432,28 @@ export async function fetchTrainingPlanResponses(eventId: string) {
   const client = requireSupabase();
   await ensureActiveSession(client);
 
-  const { data, error } = await client
+  const primaryResult = await client
     .from("training_plan_responses")
     .select(
-      "id, event_id, member_id, status, selected_days, selected_hours, note, updated_at, member:profiles!training_plan_responses_member_id_fkey(display_name, username)",
+      "id, event_id, member_id, status, selected_days, selected_hours, selected_slots, note, updated_at, member:profiles!training_plan_responses_member_id_fkey(display_name, username)",
     )
     .eq("event_id", eventId)
     .order("updated_at", { ascending: false });
+  let data = primaryResult.data as TrainingPlanResponseRow[] | null;
+  let error = primaryResult.error;
+
+  if (error && isMissingColumnError(error, "selected_slots")) {
+    const fallbackResult = await client
+      .from("training_plan_responses")
+      .select(
+        "id, event_id, member_id, status, selected_days, selected_hours, note, updated_at, member:profiles!training_plan_responses_member_id_fkey(display_name, username)",
+      )
+      .eq("event_id", eventId)
+      .order("updated_at", { ascending: false });
+
+    data = fallbackResult.data as TrainingPlanResponseRow[] | null;
+    error = fallbackResult.error;
+  }
 
   if (error) {
     throw new Error(error.message);
@@ -1381,13 +1483,34 @@ export async function upsertTrainingPlanResponse(
     status: input.status,
     selected_days: input.selectedDays,
     selected_hours: input.selectedHours,
+    selected_slots: input.selectedSlots,
     note: input.note.trim(),
     updated_at: new Date().toISOString(),
   };
 
-  const { error } = await client.from("training_plan_responses").upsert(payload, {
+  const primaryResult = await client.from("training_plan_responses").upsert(payload, {
     onConflict: "event_id,member_id",
   });
+  let error = primaryResult.error;
+
+  if (error && isMissingColumnError(error, "selected_slots")) {
+    const fallbackResult = await client.from("training_plan_responses").upsert(
+      {
+        event_id: input.eventId,
+        member_id: session.user.id,
+        status: input.status,
+        selected_days: input.selectedDays,
+        selected_hours: input.selectedHours,
+        note: input.note.trim(),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        onConflict: "event_id,member_id",
+      },
+    );
+
+    error = fallbackResult.error;
+  }
 
   if (error) {
     throw new Error(error.message);

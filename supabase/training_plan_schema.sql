@@ -10,6 +10,7 @@ create table if not exists public.training_plan_events (
   created_by uuid not null references public.profiles (id) on delete cascade,
   possible_days text[] not null default '{}'::text[],
   possible_hours text[] not null default '{}'::text[],
+  possible_slots jsonb not null default '{}'::jsonb,
   is_locked boolean not null default false,
   locked_day text,
   locked_hour text,
@@ -26,6 +27,9 @@ alter table public.training_plan_events
 alter table public.training_plan_events
   add column if not exists match_source text;
 
+alter table public.training_plan_events
+  add column if not exists possible_slots jsonb not null default '{}'::jsonb;
+
 create table if not exists public.training_plan_responses (
   id uuid primary key default gen_random_uuid(),
   event_id uuid not null references public.training_plan_events (id) on delete cascade,
@@ -33,10 +37,38 @@ create table if not exists public.training_plan_responses (
   status text not null check (status in ('yes', 'maybe', 'no')),
   selected_days text[] not null default '{}'::text[],
   selected_hours text[] not null default '{}'::text[],
+  selected_slots jsonb not null default '{}'::jsonb,
   note text not null default '' check (char_length(note) <= 400),
   updated_at timestamptz not null default now(),
   unique (event_id, member_id)
 );
+
+alter table public.training_plan_responses
+  add column if not exists selected_slots jsonb not null default '{}'::jsonb;
+
+update public.training_plan_events
+set possible_slots = coalesce(
+  (
+    select jsonb_object_agg(day_value, to_jsonb(coalesce(possible_hours, '{}'::text[])))
+    from unnest(coalesce(possible_days, '{}'::text[])) as day_value
+  ),
+  '{}'::jsonb
+)
+where coalesce(possible_slots, '{}'::jsonb) = '{}'::jsonb
+  and cardinality(coalesce(possible_days, '{}'::text[])) > 0
+  and cardinality(coalesce(possible_hours, '{}'::text[])) > 0;
+
+update public.training_plan_responses
+set selected_slots = coalesce(
+  (
+    select jsonb_object_agg(day_value, to_jsonb(coalesce(selected_hours, '{}'::text[])))
+    from unnest(coalesce(selected_days, '{}'::text[])) as day_value
+  ),
+  '{}'::jsonb
+)
+where coalesce(selected_slots, '{}'::jsonb) = '{}'::jsonb
+  and cardinality(coalesce(selected_days, '{}'::text[])) > 0
+  and cardinality(coalesce(selected_hours, '{}'::text[])) > 0;
 
 create table if not exists public.training_plan_settings (
   id text primary key default 'default',
